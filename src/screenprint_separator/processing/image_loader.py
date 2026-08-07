@@ -1,15 +1,15 @@
 from io import BytesIO
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 class ImageLoader:
 
     @staticmethod
     def load(data: bytes) -> tuple[Image.Image, np.ndarray]:
-        image = Image.open(BytesIO(data))
-        image = image.convert("RGB")
+        with Image.open(BytesIO(data)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
 
         return image, np.array(image)
 

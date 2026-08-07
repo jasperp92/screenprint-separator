@@ -22,3 +22,8 @@ build-backend = "uv_build"
 
 [tool.uv]
 link-mode = "copy"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.2",
+]
