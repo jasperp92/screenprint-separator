@@ -1,4 +1,5 @@
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 from nicegui import events, run, ui
@@ -8,7 +9,11 @@ from screenprint_separator.export.plate_exporter import export_project
 from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.project import Project
 from screenprint_separator.models.settings import Settings
-from screenprint_separator.processing.color_converter import ColorConverter
+from screenprint_separator.processing.color_library import (
+    ColorEntry,
+    ColorLibrary,
+    color_from_cmyk,
+)
 from screenprint_separator.processing.image_loader import ImageLoader
 from screenprint_separator.processing.pipeline import SeparationResult, process_image
 
@@ -24,30 +29,65 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     return tuple(int(color[index:index + 2], 16) for index in (0, 2, 4))
 
 
-def _ink_from_rgb(name: str, rgb: tuple[int, int, int]) -> Ink:
-    lab = ColorConverter.rgb_to_lab(np.asarray(rgb, dtype=np.uint8))
+def _ink_from_cmyk(
+    name: str,
+    cmyk: tuple[float, float, float, float],
+) -> Ink:
+    rgb, lab = color_from_cmyk(cmyk)
     return Ink(
         name=name,
-        pantone=name,
-        lab=tuple(float(value) for value in lab),
+        lab=lab,
         rgb_preview=rgb,
+        cmyk=cmyk,
+        opacity=0.72,
+    )
+
+
+def _ink_from_entry(entry: ColorEntry) -> Ink:
+    return Ink(
+        name=entry.name,
+        pantone=entry.name if entry.system == "pantone" else "",
+        lab=entry.lab,
+        rgb_preview=entry.rgb,
+        color_source="library",
+        cmyk=entry.cmyk or (0.0, 0.0, 0.0, 0.0),
+        library_id=entry.id,
         opacity=0.72,
     )
 
 
 class MainView:
     def __init__(self) -> None:
+        library_path = Path.cwd() / "color_library.json"
+        if not library_path.exists():
+            library_path = Path(__file__).resolve().parents[3] / "color_library.json"
+        self.color_library = ColorLibrary.load(library_path)
+
+        settings = Settings()
+        paper_entry = self.color_library.by_id.get(settings.paper_id)
+        if paper_entry is not None and paper_entry.system == "paper":
+            settings.paper = paper_entry.rgb
+
+        defaults = [
+            entry for entry in self.color_library.entries if entry.system != "paper"
+        ][:3]
+        default_inks = (
+            [_ink_from_entry(entry) for entry in defaults]
+            if len(defaults) == 3
+            else [
+                _ink_from_cmyk("Farbe 1", (94.0, 0.0, 15.0, 81.0)),
+                _ink_from_cmyk("Farbe 2", (0.0, 5.0, 39.0, 0.0)),
+                _ink_from_cmyk("Farbe 3", (22.0, 16.0, 0.0, 0.0)),
+            ]
+        )
         self.project = Project(
-            settings=Settings(),
-            inks=[
-                _ink_from_rgb("Grün", (3, 48, 41)),
-                _ink_from_rgb("Gelb", (255, 242, 155)),
-                _ink_from_rgb("Blau", (198, 215, 255)),
-            ],
+            settings=settings,
+            inks=default_inks,
         )
         self._preview_busy = False
         self._preview_dirty = False
         self._ink_titles: dict[int, object] = {}
+        self._ink_controls: dict[int, dict[str, object]] = {}
         self._plate_previews: list[tuple[Ink, object]] = []
 
         ui.add_css(
@@ -55,6 +95,7 @@ class MainView:
             body { background: #f4f1ea; }
             .settings-card { background: white; border: 1px solid #ded8cc; }
             .preview-card { background: #252525; color: white; min-height: 420px; }
+            .preview-image > img { object-fit: contain !important; }
             """
         )
 
@@ -135,12 +176,21 @@ class MainView:
             ).classes("w-full")
 
         with ui.expansion("Papier und Oberfläche", icon="texture").classes("w-full"):
-            ui.color_input(
-                "Papierfarbe",
+            self.paper_select = ui.select(
+                self._paper_options(),
+                label="Bedruckstoff / Papierfarbe",
+                value=self.project.settings.paper_id,
+                on_change=self._change_paper_selection,
+            ).classes("w-full")
+            self.custom_paper_input = ui.color_input(
+                "Eigene Papierfarbe",
                 value=_rgb_to_hex(self.project.settings.paper),
                 preview=True,
-                on_change=self._change_paper,
+                on_change=self._change_custom_paper,
             ).classes("w-full")
+            self.custom_paper_input.set_visibility(
+                self.project.settings.paper_id == "custom"
+            )
             ui.label("Erhalt der Originaltextur").classes("text-sm")
             ui.slider(
                 min=0.0,
@@ -173,7 +223,7 @@ class MainView:
         ui.separator()
         ui.label("Druckfarben").classes("text-lg font-semibold")
         ui.label(
-            "LAB steuert die Zuordnung; RGB steuert die Bildschirmdarstellung."
+            "CMYK direkt eingeben oder eine Farbe aus color_library.json wählen."
         ).classes("text-xs text-grey-7")
 
         for ink in list(self.project.inks):
@@ -181,6 +231,11 @@ class MainView:
 
         self.order_label = ui.label().classes("text-sm font-medium")
         self._update_order_label()
+        ui.button(
+            "Farbbibliothek neu laden",
+            icon="refresh",
+            on_click=self._reload_color_library,
+        ).props("flat dense")
 
         ui.separator()
         self.export_button = ui.button(
@@ -204,32 +259,70 @@ class MainView:
                     on_click=lambda ink=ink: self._move_ink(ink, 1),
                 ).props("flat dense round")
 
-            ui.input(
-                "Pantone / Bezeichnung",
-                value=ink.pantone,
-                on_change=lambda event, ink=ink: self._change_ink_name(
-                    ink, event.value
-                ),
-            ).classes("w-full")
-            ui.color_input(
-                "Vorschaufarbe",
-                value=_rgb_to_hex(ink.rgb_preview),
-                preview=True,
-                on_change=lambda event, ink=ink: self._change_ink_rgb(
+            source_select = ui.select(
+                {
+                    "cmyk": "CMYK eingeben",
+                    "library": "Pantone / Farbbibliothek",
+                },
+                label="Farbquelle",
+                value=ink.color_source,
+                on_change=lambda event, ink=ink: self._change_ink_source(
                     ink, event.value
                 ),
             ).classes("w-full")
 
-            with ui.row().classes("w-full gap-2"):
-                for index, label in enumerate(("L*", "a*", "b*")):
-                    ui.number(
-                        label,
-                        value=round(ink.lab[index], 2),
-                        step=0.1,
-                        on_change=lambda event, ink=ink, index=index: (
-                            self._change_ink_lab(ink, index, event.value)
-                        ),
-                    ).classes("grow min-w-[80px]")
+            swatch = ui.element("div").style(
+                self._swatch_style(ink.rgb_preview)
+            ).classes("w-full")
+
+            with ui.column().classes("w-full gap-2") as cmyk_group:
+                name_input = ui.input(
+                    "Bezeichnung",
+                    value=ink.name,
+                    on_change=lambda event, ink=ink: self._change_ink_name(
+                        ink, event.value
+                    ),
+                ).classes("w-full")
+                with ui.row().classes("w-full gap-2"):
+                    cmyk_inputs = []
+                    for index, label in enumerate(("C %", "M %", "Y %", "K %")):
+                        field = ui.number(
+                            label,
+                            value=round(ink.cmyk[index], 1),
+                            min=0,
+                            max=100,
+                            step=0.5,
+                            on_change=lambda event, ink=ink, index=index: (
+                                self._change_ink_cmyk(ink, index, event.value)
+                            ),
+                        ).classes("grow min-w-[65px]")
+                        cmyk_inputs.append(field)
+
+            with ui.column().classes("w-full gap-1") as library_group:
+                palette_select = ui.select(
+                    self._library_options(),
+                    label="Pantone / gespeicherte Farbe",
+                    value=ink.library_id or None,
+                    with_input=True,
+                    on_change=lambda event, ink=ink: self._change_library_color(
+                        ink, event.value
+                    ),
+                ).classes("w-full")
+                ui.label(
+                    "Pantone-LAB-Werte können aus einer lizenzierten Quelle "
+                    "in color_library.json eingetragen werden."
+                ).classes("text-[11px] text-grey-7")
+
+            self._ink_controls[id(ink)] = {
+                "source": source_select,
+                "swatch": swatch,
+                "cmyk_group": cmyk_group,
+                "library_group": library_group,
+                "name": name_input,
+                "cmyk_inputs": cmyk_inputs,
+                "palette": palette_select,
+            }
+            self._sync_ink_control_visibility(ink)
 
             ui.label("Überdruckstärke").classes("text-xs")
             ui.slider(
@@ -260,8 +353,8 @@ class MainView:
 
         self.status = ui.label("Noch kein Bild geladen").classes("text-grey-4")
         self.preview = ui.interactive_image("").classes(
-            "w-full max-h-[70vh] object-contain rounded-lg"
-        )
+            "preview-image rounded-lg self-center"
+        ).style("width: 100%; max-width: 100%")
         self.preview.set_visibility(False)
 
         self.palette_row = ui.row().classes("w-full gap-2 flex-wrap")
@@ -295,7 +388,27 @@ class MainView:
         if refresh:
             self.schedule_preview()
 
-    def _change_paper(self, event: events.ValueChangeEventArguments) -> None:
+    def _change_paper_selection(
+        self,
+        event: events.ValueChangeEventArguments,
+    ) -> None:
+        identifier = event.value
+        if identifier == "custom":
+            self.project.settings.paper_id = "custom"
+            self.custom_paper_input.set_visibility(True)
+            self.schedule_preview()
+            return
+
+        entry = self.color_library.by_id.get(identifier)
+        if entry is None or entry.system != "paper":
+            ui.notify("Unbekannte Papierfarbe", type="negative")
+            return
+        self.project.settings.paper_id = entry.id
+        self.project.settings.paper = entry.rgb
+        self.custom_paper_input.set_visibility(False)
+        self.schedule_preview()
+
+    def _change_custom_paper(self, event: events.ValueChangeEventArguments) -> None:
         if not event.value:
             return
         try:
@@ -303,33 +416,159 @@ class MainView:
         except ValueError as error:
             ui.notify(str(error), type="negative")
             return
+        self.project.settings.paper_id = "custom"
         self.schedule_preview()
 
     def _change_ink_name(self, ink: Ink, value: str | None) -> None:
         if not value:
             return
-        ink.pantone = value
         ink.name = value
         self._ink_titles[id(ink)].set_text(value)
         self._update_order_label()
         self.schedule_preview()
 
-    def _change_ink_rgb(self, ink: Ink, value: str | None) -> None:
-        if not value:
+    @staticmethod
+    def _swatch_style(rgb: tuple[int, int, int]) -> str:
+        return (
+            f"background:{_rgb_to_hex(rgb)};height:36px;border-radius:6px;"
+            "border:1px solid rgba(0,0,0,.25)"
+        )
+
+    def _library_options(self) -> dict[str, str]:
+        return {
+            entry.id: (
+                f"PANTONE · {entry.name}"
+                if entry.system == "pantone"
+                else entry.name
+            )
+            for entry in self.color_library.entries
+            if entry.system != "paper"
+        }
+
+    def _paper_options(self) -> dict[str, str]:
+        options = {
+            entry.id: entry.name
+            for entry in self.color_library.entries
+            if entry.system == "paper"
+        }
+        options["custom"] = "Eigene Papierfarbe …"
+        return options
+
+    def _sync_ink_control_visibility(self, ink: Ink) -> None:
+        controls = self._ink_controls[id(ink)]
+        controls["cmyk_group"].set_visibility(ink.color_source == "cmyk")
+        controls["library_group"].set_visibility(ink.color_source == "library")
+
+    def _change_ink_source(self, ink: Ink, value: str | None) -> None:
+        if value not in {"cmyk", "library"}:
             return
-        try:
-            ink.rgb_preview = _hex_to_rgb(value)
-        except ValueError as error:
-            ui.notify(str(error), type="negative")
-            return
+        ink.color_source = value
+        if value == "cmyk":
+            ink.library_id = ""
+            ink.pantone = ""
+            ink.rgb_preview, ink.lab = color_from_cmyk(ink.cmyk)
+            self._update_ink_swatch(ink)
+        elif ink.library_id in self.color_library.by_id:
+            self._apply_library_entry(ink, self.color_library.by_id[ink.library_id])
+        self._sync_ink_control_visibility(ink)
         self.schedule_preview()
 
-    def _change_ink_lab(self, ink: Ink, index: int, value: float | None) -> None:
+    def _change_ink_cmyk(
+        self,
+        ink: Ink,
+        index: int,
+        value: float | None,
+    ) -> None:
         if value is None:
             return
-        values = list(ink.lab)
-        values[index] = float(value)
-        ink.lab = tuple(values)
+        components = list(ink.cmyk)
+        components[index] = float(np.clip(value, 0.0, 100.0))
+        ink.cmyk = tuple(components)
+        ink.rgb_preview, ink.lab = color_from_cmyk(ink.cmyk)
+        ink.color_source = "cmyk"
+        ink.library_id = ""
+        ink.pantone = ""
+        self._update_ink_swatch(ink)
+        self.schedule_preview()
+
+    def _change_library_color(self, ink: Ink, identifier: str | None) -> None:
+        if not identifier:
+            return
+        entry = self.color_library.by_id.get(identifier)
+        if entry is None:
+            ui.notify(f"Unbekannte Bibliotheksfarbe: {identifier}", type="negative")
+            return
+        self._apply_library_entry(ink, entry)
+        self.schedule_preview()
+
+    def _apply_library_entry(self, ink: Ink, entry: ColorEntry) -> None:
+        ink.name = entry.name
+        ink.pantone = entry.name if entry.system == "pantone" else ""
+        ink.color_source = "library"
+        ink.library_id = entry.id
+        ink.lab = entry.lab
+        ink.rgb_preview = entry.rgb
+        if entry.cmyk is not None:
+            ink.cmyk = entry.cmyk
+
+        controls = self._ink_controls[id(ink)]
+        self._ink_titles[id(ink)].set_text(ink.name)
+        controls["name"].set_value(ink.name)
+        controls["source"].set_value("library")
+        controls["palette"].set_value(entry.id)
+        if entry.cmyk is not None:
+            for field, component in zip(
+                controls["cmyk_inputs"],
+                entry.cmyk,
+                strict=True,
+            ):
+                field.set_value(component)
+        self._update_ink_swatch(ink)
+        self._sync_ink_control_visibility(ink)
+        self._update_order_label()
+
+    def _update_ink_swatch(self, ink: Ink) -> None:
+        self._ink_controls[id(ink)]["swatch"].style(
+            replace=self._swatch_style(ink.rgb_preview)
+        )
+
+    def _reload_color_library(self) -> None:
+        try:
+            self.color_library = ColorLibrary.load(self.color_library.path)
+        except (OSError, TypeError, ValueError) as error:
+            ui.notify(f"Farbbibliothek konnte nicht geladen werden: {error}", type="negative")
+            return
+
+        options = self._library_options()
+        for ink in self.project.inks:
+            controls = self._ink_controls[id(ink)]
+            value = ink.library_id if ink.library_id in self.color_library.by_id else None
+            controls["palette"].set_options(options, value=value)
+            if value:
+                self._apply_library_entry(ink, self.color_library.by_id[value])
+
+        paper_options = self._paper_options()
+        paper_id = self.project.settings.paper_id
+        if paper_id != "custom":
+            paper_entry = self.color_library.by_id.get(paper_id)
+            if paper_entry is None or paper_entry.system != "paper":
+                paper_id = "custom"
+                self.project.settings.paper_id = "custom"
+            else:
+                self.project.settings.paper = paper_entry.rgb
+        self.paper_select.set_options(paper_options, value=paper_id)
+        self.custom_paper_input.set_visibility(paper_id == "custom")
+
+        ink_count = sum(
+            entry.system != "paper" for entry in self.color_library.entries
+        )
+        paper_count = sum(
+            entry.system == "paper" for entry in self.color_library.entries
+        )
+        ui.notify(
+            f"{ink_count} Druckfarben und {paper_count} Papierfarben geladen",
+            type="positive",
+        )
         self.schedule_preview()
 
     def _change_ink_value(self, ink: Ink, name: str, value: float | None) -> None:
@@ -424,6 +663,13 @@ class MainView:
         self.preview.set_visibility(True)
         self.status.set_text("Simulation aktuell")
         width, height = result.simulation.size
+        aspect_ratio = width / height
+        self.preview.style(
+            replace=(
+                f"width: min(100%, calc(70vh * {aspect_ratio:.8f})); "
+                f"max-width: 100%; aspect-ratio: {width} / {height}"
+            )
+        )
         self.preview_size.set_text(f"Vorschaugröße: {width} × {height} px")
 
         self.palette_row.clear()

@@ -17,4 +17,5 @@ class Settings:
     threshold: int = 128
     trapping_px: int = 0
 
+    paper_id: str = "paper-warm-gray"
     paper: tuple[int, int, int] = (191, 188, 181)
