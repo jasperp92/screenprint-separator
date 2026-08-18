@@ -1,3 +1,4 @@
+import sys
 from copy import deepcopy
 from pathlib import Path
 
@@ -61,9 +62,16 @@ def _ink_from_entry(entry: ColorEntry) -> Ink:
 
 class MainView:
     def __init__(self) -> None:
-        library_path = Path.cwd() / "color_library.json"
-        if not library_path.exists():
-            library_path = Path(__file__).resolve().parents[3] / "color_library.json"
+        bundle_root = Path(getattr(sys, "_MEIPASS", Path.cwd()))
+        library_candidates = (
+            Path.cwd() / "color_library.json",
+            bundle_root / "color_library.json",
+            Path(__file__).resolve().parents[3] / "color_library.json",
+        )
+        library_path = next(
+            (path for path in library_candidates if path.exists()),
+            library_candidates[-1],
+        )
         self.color_library = ColorLibrary.load(library_path)
 
         settings = Settings()
@@ -87,7 +95,12 @@ class MainView:
             settings=settings,
             inks=default_inks,
         )
-        self.session_store = SessionStore(library_path.parent)
+        session_root = (
+            Path.home() / ".screenprint_separator"
+            if getattr(sys, "frozen", False)
+            else library_path.parent
+        )
+        self.session_store = SessionStore(session_root)
         self.project, self._cached_filename = self.session_store.load(fallback_project)
         self._preview_busy = False
         self._preview_dirty = False

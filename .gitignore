@@ -8,3 +8,14 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .screenprint_separator_cache/
+
+# PyInstaller and packaged applications
+build/
+dist/
+*.spec
+*.app
+*.dmg
+
+# macOS metadata
+.DS_Store
+._*

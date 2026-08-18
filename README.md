@@ -5,13 +5,133 @@ Siebdruckfarben. Die Vorschau klassifiziert Bildfarben gegen alle möglichen
 Druckzustände – von zwei Zuständen bei einer Farbe bis zu 32 Zuständen bei fünf
 Farben.
 
-## Start
+## Entwicklung
 
-```powershell
-.\.venv\Scripts\screenprint-separator.exe
+Voraussetzungen sind Python 3.13 und der Paketmanager
+[`uv`](https://docs.astral.sh/uv/). Nach dem Klonen des Repositories installiert
+folgender Befehl Python und alle in `pyproject.toml`/`uv.lock` festgelegten
+Komponenten in die lokale virtuelle Umgebung:
+
+```bash
+uv sync --dev
 ```
 
-Anschließend ist die Oberfläche unter <http://localhost:8080> erreichbar.
+Danach wird die NiceGUI-Anwendung im Entwicklungsmodus gestartet:
+
+```bash
+uv run screenprint-separator
+```
+
+Alternativ kann das Startmodul direkt ausgeführt werden:
+
+```bash
+uv run python src/screenprint_separator/app.py
+```
+
+Die Oberfläche ist anschließend unter <http://localhost:8080> erreichbar.
+Änderungen an Python-Dateien unter `src/` lösen automatisch einen Hot Reload
+aus. Der lokale Sitzungscache stellt dabei Einstellungen und Eingabebild wieder
+her.
+
+## Windows-EXE erstellen
+
+Eine Windows-EXE muss unter Windows gebaut werden; PyInstaller erzeugt keine
+Windows-Datei von macOS oder Linux aus. Im Projektverzeichnis werden zunächst
+die regulären Abhängigkeiten installiert:
+
+```powershell
+uv sync --dev
+```
+
+Danach erstellt NiceGUIs PyInstaller-Hilfsprogramm eine einzelne ausführbare
+Datei. `uv` installiert PyInstaller dafür vorübergehend, ohne die
+Projektabhängigkeiten zu verändern:
+
+```powershell
+uv run --with pyinstaller nicegui-pack --name ScreenprintSeparator --onefile --clean --noconfirm --add-data "color_library.json;." src/screenprint_separator/app.py
+```
+
+Das Ergebnis befindet sich anschließend hier:
+
+```powershell
+.\dist\ScreenprintSeparator.exe
+```
+
+Die EXE startet den lokalen Server und öffnet die Oberfläche im Browser. Im
+Build wird Hot Reload automatisch deaktiviert. `color_library.json` wird durch
+`--add-data` in die EXE aufgenommen. Der Sitzungscache liegt bei der gebündelten
+Anwendung dauerhaft unter
+`%USERPROFILE%\.screenprint_separator\.screenprint_separator_cache\`.
+
+## macOS-App erstellen
+
+Eine macOS-App muss auf einem Mac gebaut werden. PyInstaller erzeugt dabei eine
+App für die Architektur des Build-Rechners, also Apple Silicon oder Intel.
+Zunächst werden die Projektabhängigkeiten installiert:
+
+```bash
+uv sync --dev
+```
+
+Danach erstellt NiceGUIs Packaging-Hilfe eine eigenständige `.app`. PyInstaller
+und `pywebview` werden von `uv` nur für diesen Build bereitgestellt:
+
+```bash
+uv run --with pyinstaller --with pywebview nicegui-pack \
+  --name ScreenprintSeparator \
+  --windowed \
+  --onefile \
+  --clean \
+  --noconfirm \
+  --add-data "color_library.json:." \
+  src/screenprint_separator/app.py
+```
+
+Die fertige Anwendung liegt anschließend hier:
+
+```text
+dist/ScreenprintSeparator.app
+```
+
+Sie kann im Finder per Doppelklick oder im Terminal gestartet werden:
+
+```bash
+open dist/ScreenprintSeparator.app
+```
+
+Der macOS-Build öffnet die Oberfläche als natives App-Fenster mit `pywebview`.
+Hot Reload ist darin deaktiviert. Für die lokale Entwicklung bleibt weiterhin
+der Browsermodus aktiv. Da ein lokaler Build nicht mit einem Apple Developer
+Certificate signiert oder notarisiert ist, kann macOS beim ersten Start warnen.
+In diesem Fall kann die App im Finder über Rechtsklick → „Öffnen“ bestätigt
+werden. Für die Verteilung an andere Macs sollte die App mit einer Developer-ID
+signiert und anschließend von Apple notarisiert werden.
+
+Der Sitzungscache der App befindet sich dauerhaft unter:
+
+```text
+~/.screenprint_separator/.screenprint_separator_cache/
+```
+
+### Automatischer Build mit GitHub Actions
+
+Der Workflow `.github/workflows/build-macos.yml` kann unter GitHub → Actions →
+„Build macOS App“ manuell gestartet werden. Das ZIP steht danach als
+Workflow-Artefakt zum Download bereit.
+
+Wird ein Versions-Tag gepusht, erstellt der Workflow zusätzlich automatisch ein
+GitHub Release und hängt die gebaute App daran:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Der Dateiname enthält die Architektur des GitHub-Runners, beispielsweise
+`ScreenprintSeparator-macOS-arm64.zip`. Dieser Workflow erzeugt zunächst einen
+unsignierten Build. Für eine öffentliche Verteilung müssen später
+Developer-ID-Zertifikat und Notarisierungsdaten als GitHub-Secrets ergänzt
+werden.
 
 ## Farbverarbeitung
 
@@ -27,7 +147,7 @@ Anschließend ist die Oberfläche unter <http://localhost:8080> erreichbar.
 
 ## CMYK und Pantone
 
-Die drei Druckfarben werden in der Oberfläche entweder als CMYK-Prozentwerte
+Die ein bis fünf Druckfarben werden in der Oberfläche entweder als CMYK-Prozentwerte
 eingegeben oder aus `color_library.json` ausgewählt. RGB und LAB werden intern
 berechnet und müssen nicht manuell bedient werden.
 
@@ -52,9 +172,8 @@ Bildschirmsimulation benutzt. Fehlt `rgb`, wird es aus LAB abgeleitet; fehlen
 LAB und RGB, werden beide näherungsweise aus CMYK berechnet. Nach Änderungen an
 der JSON-Datei kann sie über „Farbbibliothek neu laden“ aktualisiert werden.
 
-Papierfarben verwenden `"system": "paper"` und erscheinen ausschließlich im
-Dropdown „Bedruckstoff / Papierfarbe“. Sie sind keine vierte Druckfarbe und
-erzeugen keine Platte:
+Papierfarben verwenden `"system": "paper"` und erscheinen ausschließlich in
+der Papierauswahl. Sie zählen nicht als Druckfarbe und erzeugen keine Platte:
 
 ```json
 {
@@ -65,20 +184,20 @@ erzeugen keine Platte:
 }
 ```
 
-Zusätzlich bietet das Dropdown „Eigene Papierfarbe …“. Diese Auswahl blendet
-einen Farbwähler ein und verwendet die gewählte Farbe für den unbedruckten
-Hintergrund, die Papier-Klasse und gegebenenfalls freie Ränder beim Einpassen.
+Alternativ kann eine eigene LAB-Referenzfarbe für das Papier eingegeben werden.
+Die Papierfarbe wird für den unbedruckten Hintergrund, die Papier-Klasse und
+gegebenenfalls freie Ränder beim Einpassen verwendet.
 
 ## Mischfarben
 
-Im Modus „Selbst finden“ werden die drei Zweifachüberdrucke und der
-Dreifachüberdruck im RGB-Raum angenähert. Die Reihenfolge der Druckfarben legt
-dabei fest, welche Farbe oben liegt; deren „Überdruckstärke“ ist der Alpha-Wert.
+Im Modus „Automatisch“ werden alle möglichen Überdruckkombinationen im RGB-Raum
+angenähert. Die Reihenfolge der Druckfarben legt dabei fest, welche Farbe oben
+liegt; deren „Überdruckstärke“ ist der Alpha-Wert.
 
-Im Modus „Eigene Messfarben“ lassen sich für alle vier Mischzustände entweder
-eine Bildschirmfarbe oder gemessene CIELAB-D50-Werte eingeben. Diese Werte
-ersetzen die Näherung sowohl bei der Klassifikation als auch in Simulation und
-Export. Beim Umsortieren der Druckfarben bleiben Messwerte ihrer jeweiligen
+Für jede Überdruckkombination kann die Näherung durch eine Pantone-Farbe aus der
+JSON-Bibliothek oder einen gemessenen CIELAB-D50-Wert ersetzt werden. Diese Werte
+gelten sowohl für Klassifikation als auch für Simulation und Export. Beim
+Umsortieren, Ergänzen oder Löschen bleiben Referenzen ihrer jeweiligen
 Farbkombination zugeordnet.
 
 ## Export
@@ -86,7 +205,7 @@ Farbkombination zugeordnet.
 Der ZIP-Export enthält:
 
 - die Simulation als PNG,
-- drei binäre, Group-4-komprimierte 1-Bit-TIFF-Platten,
+- eine bis fünf binäre, Group-4-komprimierte 1-Bit-TIFF-Platten,
 - `projekt.json` mit Druckreihenfolge, LAB-Palette und Einstellungen.
 
 Die TIFF-Platten selbst sind absichtlich Schwarz-Weiß-Bitmaps. LAB-Werte werden
