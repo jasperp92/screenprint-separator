@@ -79,7 +79,7 @@ class ColorClassifier:
     def __init__(
         self,
         palette: OverprintPalette,
-        ink_biases: tuple[float, float, float] | list[float],
+        ink_biases: tuple[float, ...] | list[float],
     ) -> None:
         self.palette = palette
         self.state_biases = palette.masks @ np.asarray(ink_biases, dtype=np.float32)

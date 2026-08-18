@@ -4,57 +4,96 @@
   "colors": [
     {
       "id": "custom-green",
-      "name": "Eigenes Grün",
+      "name": "Dunkelgrün",
       "system": "custom",
-      "cmyk": [94.0, 0.0, 15.0, 81.0]
+      "cmyk": [
+        94.0,
+        0.0,
+        15.0,
+        81.0
+      ]
     },
     {
       "id": "custom-yellow",
-      "name": "Eigenes Gelb",
+      "name": "Hellgelb",
       "system": "custom",
-      "cmyk": [0.0, 5.0, 39.0, 0.0]
+      "cmyk": [
+        0.0,
+        5.0,
+        39.0,
+        0.0
+      ]
     },
     {
       "id": "custom-blue",
-      "name": "Eigenes Blau",
+      "name": "Hellblau",
       "system": "custom",
-      "cmyk": [22.0, 16.0, 0.0, 0.0]
+      "cmyk": [
+        22.0,
+        16.0,
+        0.0,
+        0.0
+      ]
     },
     {
       "id": "paper-bright-white",
       "name": "Reinweiß",
       "system": "paper",
-      "rgb": [255, 255, 255]
+      "rgb": [
+        255,
+        255,
+        255
+      ]
     },
     {
       "id": "paper-natural-white",
       "name": "Naturweiß",
       "system": "paper",
-      "rgb": [238, 233, 215]
+      "rgb": [
+        238,
+        233,
+        215
+      ]
     },
     {
       "id": "paper-cream",
       "name": "Creme",
       "system": "paper",
-      "rgb": [231, 216, 176]
+      "rgb": [
+        231,
+        216,
+        176
+      ]
     },
     {
       "id": "paper-light-gray",
       "name": "Hellgrau",
       "system": "paper",
-      "rgb": [205, 205, 200]
+      "rgb": [
+        205,
+        205,
+        200
+      ]
     },
     {
       "id": "paper-warm-gray",
       "name": "Warmgrau",
       "system": "paper",
-      "rgb": [191, 188, 181]
+      "rgb": [
+        191,
+        188,
+        181
+      ]
     },
     {
       "id": "paper-kraft",
       "name": "Kraftpapier",
       "system": "paper",
-      "rgb": [181, 145, 93]
+      "rgb": [
+        181,
+        145,
+        93
+      ]
     }
   ]
 }

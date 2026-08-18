@@ -130,7 +130,7 @@ class MainView:
         with ui.column().classes("w-full max-w-[1900px] mx-auto p-4 gap-4"):
             ui.label("Screenprint Separator").classes("text-3xl font-bold")
             ui.label(
-                "Drei Druckfarben · acht Überdruckzustände"
+                "Eine bis fünf Druckfarben · automatische Überdruckzustände"
             ).classes("text-grey-7")
 
             with ui.row().classes("w-full items-start gap-4 flex-wrap xl:flex-nowrap"):
@@ -179,7 +179,7 @@ class MainView:
         self.upload_status = upload_status
         self.upload_status.set_visibility(False)
 
-        with ui.expansion("Bildbearbeitung", icon="tune").classes(
+        with ui.expansion("Helligkeit und Kontrast", icon="contrast").classes(
             "w-full"
         ):
             ui.label("Helligkeit").classes("text-sm")
@@ -217,7 +217,11 @@ class MainView:
                     "texture_amount", event.value, float
                 ),
             ).props("label-always")
-            ui.label("Glättungsradius").classes("text-sm")
+            self._build_info_label(
+                "Glättungsradius",
+                "Weichzeichnet das Eingabebild vor der Separation. Höhere Werte "
+                "reduzieren feine Details und Bildrauschen.",
+            )
             ui.slider(
                 min=0.0,
                 max=5.0,
@@ -227,14 +231,18 @@ class MainView:
                     "texture_blur_radius", event.value, float
                 ),
             ).props("label-always")
+            self._build_info_label(
+                "Klassenglättung",
+                "Glättet die fertig zugeordneten Farbklassen. Größere Werte "
+                "entfernen kleine isolierte Punkte, können aber Details verlieren.",
+            )
             ui.select(
                 [1, 3, 5, 7],
-                label="Klassenglättung",
                 value=self.project.settings.class_smooth_size,
                 on_change=lambda event: self._change_setting(
                     "class_smooth_size", event.value, int
                 ),
-            ).classes("w-full")
+            ).props('aria-label="Klassenglättung"').classes("w-full")
 
         with ui.expansion("Simulationsvorschau", icon="photo_size_select_large").classes(
             "w-full"
@@ -267,7 +275,11 @@ class MainView:
             self.preview_height_input.set_enabled(self.project.image is not None)
 
     def _build_ink_settings(self) -> None:
-        ui.label("Druckfarben").classes("text-xl font-semibold")
+        with ui.row().classes("w-full items-center"):
+            ui.label("Druckfarben").classes("text-xl font-semibold grow")
+            ui.button(icon="add", on_click=self._add_ink).props(
+                "flat dense round"
+            ).tooltip("Druckfarbe hinzufügen")
 
         paper_card = ui.expansion().props("dense expand-separator").classes(
             "warm-control w-full rounded-lg"
@@ -331,7 +343,9 @@ class MainView:
 
         self.order_label = ui.label().classes("text-sm font-medium")
         self._update_order_label()
-        self._build_overprint_controls()
+        with ui.column().classes("w-full gap-2") as overprint_container:
+            self.overprint_container = overprint_container
+            self._build_overprint_controls()
         ui.button(
             "Farbbibliothek neu laden",
             icon="refresh",
@@ -353,6 +367,11 @@ class MainView:
                 summary_swatch = ui.element("div").classes("shrink-0")
                 summary = ui.label().classes("text-sm grow truncate")
                 opacity_label = ui.label().classes("text-sm font-medium shrink-0")
+                ui.button(
+                    icon="delete_outline",
+                    color="negative",
+                    on_click=lambda ink=ink: self._delete_ink(ink),
+                ).props("flat dense round size=sm").tooltip("Druckfarbe löschen")
 
         with card:
             source_select = ui.toggle(
@@ -420,9 +439,13 @@ class MainView:
             }
             self._sync_ink_control_visibility(ink)
 
-            ui.label("Überdruckstärke · nur für Automatikmodus").classes(
-                "text-xs px-2"
-            )
+            with ui.element("div").classes("px-2"):
+                self._build_info_label(
+                    "Überdruckstärke",
+                    "Legt die Deckkraft der obenliegenden Farbe bei automatisch "
+                    "berechneten Überdruckfarben fest. Der Wert wirkt nur im "
+                    "Automatikmodus; Pantone- und LAB-Messwerte bleiben unverändert.",
+                )
             ui.slider(
                 min=0.0,
                 max=1.0,
@@ -432,7 +455,13 @@ class MainView:
                     ink, "opacity", event.value
                 ),
             ).props("label-always").classes("px-2")
-            ui.label("Klassifikations-Bias (ΔE)").classes("text-xs")
+            with ui.element("div").classes("px-2"):
+                self._build_info_label(
+                    "Klassifikations-Bias (ΔE)",
+                    "Verschiebt die Farbzuordnung zugunsten oder zulasten dieser "
+                    "Druckfarbe. Positive Werte bevorzugen Zustände mit dieser "
+                    "Farbe; negative Werte machen ihre Auswahl zurückhaltender.",
+                )
             ui.slider(
                 min=-10.0,
                 max=20.0,
@@ -441,15 +470,23 @@ class MainView:
                 on_change=lambda event, ink=ink: self._change_ink_value(
                     ink, "bias", event.value
                 ),
-            ).props("label-always")
+            ).props("label-always").classes("px-2")
         self._update_ink_summary(ink)
 
     def _build_overprint_controls(self) -> None:
         ui.separator()
         ui.label("Überdruckfarben").classes("text-lg font-semibold uppercase")
         self._ensure_measured_overprints()
-        for heading, states in (("2 Platten", (4, 5, 6)), ("3 Platten", (7,))):
-            ui.label(heading).classes("text-xs font-medium text-grey-7 mt-1")
+        palette = self._automatic_palette()
+        for plate_count in range(2, len(self.project.inks) + 1):
+            states = tuple(
+                state
+                for state in mixed_state_indices(len(self.project.inks))
+                if int(palette.masks[state].sum()) == plate_count
+            )
+            ui.label(f"{plate_count} Platten").classes(
+                "text-xs font-medium text-grey-7 mt-1"
+            )
             for state in states:
                 row = ui.expansion().props("dense expand-separator").classes(
                     "warm-control w-full rounded-lg"
@@ -524,7 +561,7 @@ class MainView:
 
     def _ensure_measured_overprints(self) -> None:
         palette = self._automatic_palette()
-        for state in mixed_state_indices():
+        for state in mixed_state_indices(len(self.project.inks)):
             self.project.measured_overprints.setdefault(
                 state,
                 tuple(float(value) for value in palette.lab[state]),
@@ -642,18 +679,22 @@ class MainView:
 
         self.palette_row = ui.row().classes("w-full gap-2 flex-wrap")
 
-        with (
-            ui.expansion("Plattenvorschau", icon="layers").classes("w-full"),
-            ui.row().classes("w-full gap-3 flex-wrap"),
-        ):
-                for ink in self.project.inks:
-                    with ui.column().classes("grow min-w-[180px]"):
-                        ui.label(ink.name).classes("font-medium")
-                        plate = ui.image("").classes("w-full rounded")
-                        plate.set_visibility(False)
-                        self._plate_previews.append((ink, plate))
+        with ui.expansion("Plattenvorschau", icon="layers").classes("w-full"):
+            self.plate_preview_row = ui.row().classes("w-full gap-3 flex-wrap")
+            self._rebuild_plate_previews()
 
         self._build_export_settings()
+
+    def _rebuild_plate_previews(self) -> None:
+        self._plate_previews = []
+        self.plate_preview_row.clear()
+        with self.plate_preview_row:
+            for index, ink in enumerate(self.project.inks, start=1):
+                with ui.column().classes("grow min-w-[150px]"):
+                    ui.label(f"{index} · {ink.name}").classes("font-medium")
+                    plate = ui.image("").classes("w-full rounded")
+                    plate.set_visibility(False)
+                    self._plate_previews.append((ink, plate))
 
     def _build_export_settings(self) -> None:
         ui.separator().classes("bg-grey-7")
@@ -679,22 +720,34 @@ class MainView:
                     ),
                 ).classes("grow")
             with ui.row().classes("w-full"):
-                ui.number(
-                    "Arbeits-DPI",
-                    value=self.project.settings.dpi,
-                    min=72,
-                    on_change=lambda event: self._change_export_setting(
-                        "dpi", event.value, int
-                    ),
-                ).classes("grow")
-                ui.number(
-                    "Ausgabe-DPI",
-                    value=self.project.settings.output_dpi,
-                    min=72,
-                    on_change=lambda event: self._change_export_setting(
-                        "output_dpi", event.value, int
-                    ),
-                ).classes("grow")
+                with ui.column().classes("grow gap-0"):
+                    self._build_info_label(
+                        "Arbeits-DPI",
+                        "Auflösung, in der das Bild beim Export tatsächlich getrennt "
+                        "und klassifiziert wird. Mehr DPI liefern feinere Details, "
+                        "benötigen aber deutlich mehr Zeit und Speicher.",
+                    )
+                    ui.number(
+                        value=self.project.settings.dpi,
+                        min=72,
+                        on_change=lambda event: self._change_export_setting(
+                            "dpi", event.value, int
+                        ),
+                    ).props('aria-label="Arbeits-DPI"').classes("w-full")
+                with ui.column().classes("grow gap-0"):
+                    self._build_info_label(
+                        "Ausgabe-DPI",
+                        "Pixelauflösung der finalen 1-Bit-TIFF-Druckplatten. Von der "
+                        "Arbeitsauflösung wird mit dem gewählten Algorithmus auf diese "
+                        "Größe skaliert.",
+                    )
+                    ui.number(
+                        value=self.project.settings.output_dpi,
+                        min=72,
+                        on_change=lambda event: self._change_export_setting(
+                            "output_dpi", event.value, int
+                        ),
+                    ).props('aria-label="Ausgabe-DPI"').classes("w-full")
             ui.select(
                 {"fit": "Format füllen", "pad": "Einpassen mit Rand"},
                 label="Separationsskalierung",
@@ -703,6 +756,12 @@ class MainView:
                     "resize_mode", event.value, str
                 ),
             ).classes("w-full")
+            self._build_info_label(
+                "Upscaling-Algorithmus",
+                "Bestimmt, wie die separierten Platten von Arbeits-DPI auf "
+                "Ausgabe-DPI vergrößert werden. Nearest Neighbour erhält harte "
+                "Pixelkanten; Lanczos, bikubisch und bilinear interpolieren.",
+            )
             ui.select(
                 {
                     "nearest": "Pixelgenau (Nearest Neighbour)",
@@ -710,12 +769,11 @@ class MainView:
                     "bicubic": "Bikubisch",
                     "lanczos": "Lanczos",
                 },
-                label="Upscaling-Algorithmus",
                 value=self.project.settings.upscale_algorithm,
                 on_change=lambda event: self._change_export_setting(
                     "upscale_algorithm", event.value, str
                 ),
-            ).classes("w-full")
+            ).props('aria-label="Upscaling-Algorithmus"').classes("w-full")
             self.export_size_label = ui.label().classes("text-sm text-white")
             self._update_export_size_label()
 
@@ -894,6 +952,14 @@ class MainView:
         self._update_order_label()
         self._sync_overprint_controls()
         self.schedule_preview()
+
+    @staticmethod
+    def _build_info_label(text: str, tooltip: str) -> None:
+        with ui.row().classes("items-center gap-1"):
+            ui.label(text).classes("text-sm")
+            ui.icon("info_outline").classes(
+                "text-grey-6 text-base cursor-help"
+            ).tooltip(tooltip)
 
     @staticmethod
     def _swatch_style(rgb: tuple[int, int, int]) -> str:
@@ -1083,6 +1149,94 @@ class MainView:
             self._sync_automatic_mixture_controls()
         self.schedule_preview()
 
+    def _capture_overprints_by_inks(self) -> dict[frozenset[int], dict[str, object]]:
+        palette = self._automatic_palette()
+        captured = {}
+        for state in mixed_state_indices(len(self.project.inks)):
+            key = frozenset(
+                id(ink)
+                for active, ink in zip(
+                    palette.masks[state], self.project.inks, strict=True
+                )
+                if active
+            )
+            captured[key] = {
+                "lab": self.project.measured_overprints.get(state),
+                "manual": state in self.project.manual_overprint_states,
+                "source": self.project.overprint_sources.get(state),
+                "library_id": self.project.overprint_library_ids.get(state),
+            }
+        return captured
+
+    def _restore_overprints_by_inks(
+        self,
+        captured: dict[frozenset[int], dict[str, object]],
+    ) -> None:
+        palette = self._automatic_palette()
+        self.project.measured_overprints = {}
+        self.project.manual_overprint_states = set()
+        self.project.overprint_sources = {}
+        self.project.overprint_library_ids = {}
+        for state in mixed_state_indices(len(self.project.inks)):
+            key = frozenset(
+                id(ink)
+                for active, ink in zip(
+                    palette.masks[state], self.project.inks, strict=True
+                )
+                if active
+            )
+            values = captured.get(key)
+            if values is None:
+                continue
+            if values["lab"] is not None:
+                self.project.measured_overprints[state] = values["lab"]
+            if values["manual"]:
+                self.project.manual_overprint_states.add(state)
+            if values["source"] is not None:
+                self.project.overprint_sources[state] = values["source"]
+            if values["library_id"] is not None:
+                self.project.overprint_library_ids[state] = values["library_id"]
+
+    def _rebuild_overprint_controls(self) -> None:
+        self._mixture_controls = {}
+        self.overprint_container.clear()
+        with self.overprint_container:
+            self._build_overprint_controls()
+
+    def _add_ink(self) -> None:
+        if len(self.project.inks) >= 5:
+            ui.notify("Es sind maximal fünf Druckfarben möglich.", type="warning")
+            return
+        captured = self._capture_overprints_by_inks()
+        ink = _ink_from_cmyk(
+            f"Farbe {len(self.project.inks) + 1}",
+            (0.0, 0.0, 0.0, 100.0),
+        )
+        self.project.inks.append(ink)
+        with self.ink_cards:
+            self._build_ink_controls(ink)
+        self._restore_overprints_by_inks(captured)
+        self._rebuild_overprint_controls()
+        self._rebuild_plate_previews()
+        self._update_order_label()
+        self.schedule_preview()
+
+    def _delete_ink(self, ink: Ink) -> None:
+        if len(self.project.inks) <= 1:
+            ui.notify("Mindestens eine Druckfarbe muss erhalten bleiben.", type="warning")
+            return
+        captured = self._capture_overprints_by_inks()
+        self.project.inks.remove(ink)
+        controls = self._ink_controls.pop(id(ink))
+        controls["card"].delete()
+        self._restore_overprints_by_inks(captured)
+        for remaining in self.project.inks:
+            self._update_ink_summary(remaining)
+        self._rebuild_overprint_controls()
+        self._rebuild_plate_previews()
+        self._update_order_label()
+        self.schedule_preview()
+
     def _drag_ink(self, event: events.SortableEventArguments) -> None:
         if event.old_index == event.new_index:
             return
@@ -1142,7 +1296,7 @@ class MainView:
         remapped_manual_states = set()
         remapped_sources = {}
         remapped_library_ids = {}
-        for state in mixed_state_indices():
+        for state in mixed_state_indices(len(self.project.inks)):
             key = frozenset(
                 id(candidate)
                 for active, candidate in zip(masks[state], self.project.inks, strict=True)
@@ -1294,6 +1448,36 @@ class MainView:
             if self._preview_dirty:
                 self.preview_timer.activate()
 
+    def _palette_tooltip(self, state: int, name: str) -> str:
+        if state == 0:
+            if self.project.settings.paper_source == "lab":
+                return "Papier · LAB-Referenzfarbe"
+            entry = self.color_library.by_id.get(self.project.settings.paper_id)
+            return f"Papier · {entry.name if entry is not None else 'Papierfarbe'}"
+        if state <= len(self.project.inks):
+            ink = self.project.inks[state - 1]
+            if ink.color_source == "library":
+                value = ink.name
+                if not value.upper().startswith("PANTONE"):
+                    value = f"PANTONE {value}"
+            else:
+                components = "/".join(f"{value:g}" for value in ink.cmyk)
+                value = f"CMYK {components}"
+            return f"{ink.name} · {value}"
+
+        source = self.project.overprint_sources.get(state, "automatic")
+        if source == "pantone":
+            identifier = self.project.overprint_library_ids.get(state)
+            entry = self.color_library.by_id.get(identifier)
+            value = entry.name if entry is not None else "Pantone"
+            if not value.upper().startswith("PANTONE"):
+                value = f"PANTONE {value}"
+        elif source == "lab":
+            value = "LAB-Messwert"
+        else:
+            value = "Automatisch"
+        return f"{name} · {value}"
+
     def _show_result(self, result: SeparationResult) -> None:
         self.project.preview_image = result.simulation
         self.project.preview_array = np.asarray(result.simulation)
@@ -1316,18 +1500,36 @@ class MainView:
 
         self.palette_row.clear()
         with self.palette_row:
-            for name, rgb in zip(
+            previous_plate_count = None
+            for state, (name, rgb, mask) in enumerate(zip(
                 result.palette.names,
                 result.palette.rgb,
+                result.palette.masks,
                 strict=True,
-            ):
+            )):
+                plate_count = int(mask.sum())
+                if (
+                    previous_plate_count is not None
+                    and plate_count != previous_plate_count
+                ):
+                    ui.element("div").classes(
+                        "h-12 border-l border-grey-6 mx-1 self-center"
+                    )
+                previous_plate_count = plate_count
                 color = _rgb_to_hex(tuple(int(value) for value in rgb))
+                active = [
+                    str(index + 1)
+                    for index, is_active in enumerate(mask)
+                    if is_active
+                ]
+                number = "+".join(active) if active else "Papier"
+                tooltip = self._palette_tooltip(state, name)
                 with ui.column().classes("gap-0 items-center"):
                     ui.element("div").style(
                         f"background:{color};width:48px;height:32px;border-radius:6px;"
                         "border:1px solid rgba(255,255,255,.35)"
-                    ).tooltip(name)
-                    ui.label(name).classes("text-[10px] max-w-[90px] truncate")
+                    ).tooltip(tooltip)
+                    ui.label(number).classes("text-[10px]").tooltip(tooltip)
 
         for ink, image_element in self._plate_previews:
             channel = result.channels.get(ink.name)

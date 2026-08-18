@@ -38,7 +38,7 @@ class SessionStore:
                 for key in ("lab", "rgb_preview", "cmyk"):
                     values[key] = tuple(values[key])
                 inks.append(Ink(**values))
-            if len(inks) != 3:
+            if not 1 <= len(inks) <= 5:
                 inks = fallback.inks
 
             project = Project(settings=settings, inks=inks)

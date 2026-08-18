@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from itertools import combinations
 
 import numpy as np
 
@@ -19,22 +20,16 @@ def build_overprint_palette(
     paper_rgb: tuple[int, int, int],
     measured_lab: dict[int, tuple[float, float, float]] | None = None,
 ) -> OverprintPalette:
-    if len(inks) != 3:
-        raise ValueError("Für die Separation werden genau drei Farben benötigt.")
+    if not 1 <= len(inks) <= 5:
+        raise ValueError("Für die Separation werden eine bis fünf Farben benötigt.")
 
-    masks = np.array(
-        [
-            (0, 0, 0),
-            (1, 0, 0),
-            (0, 1, 0),
-            (0, 0, 1),
-            (1, 1, 0),
-            (1, 0, 1),
-            (0, 1, 1),
-            (1, 1, 1),
-        ],
-        dtype=np.uint8,
-    )
+    mask_values = [tuple(0 for _ in inks)]
+    for count in range(1, len(inks) + 1):
+        for active_indices in combinations(range(len(inks)), count):
+            mask_values.append(
+                tuple(int(index in active_indices) for index in range(len(inks)))
+            )
+    masks = np.asarray(mask_values, dtype=np.uint8)
 
     paper = np.asarray(paper_rgb, dtype=np.float32)
     colors = []
@@ -63,7 +58,7 @@ def build_overprint_palette(
 
     # Preserve user-supplied LAB values for the three solid inks. Only the
     # unmeasured overprints need to use the RGB/opacity approximation.
-    for state, ink in zip((1, 2, 3), inks, strict=True):
+    for state, ink in zip(range(1, len(inks) + 1), inks, strict=True):
         lab[state] = ink.lab
         rgb[state] = ink.rgb_preview
 
@@ -78,6 +73,7 @@ def build_overprint_palette(
     return OverprintPalette(tuple(names), masks, rgb, lab)
 
 
-def mixed_state_indices() -> tuple[int, ...]:
-    """Palette states which contain two or three inks."""
-    return (4, 5, 6, 7)
+def mixed_state_indices(ink_count: int = 3) -> tuple[int, ...]:
+    """Palette states which contain at least two inks."""
+    first_mixed_state = 1 + ink_count
+    return tuple(range(first_mixed_state, 2**ink_count))

@@ -1,9 +1,9 @@
 # Screenprint Separator
 
-NiceGUI-Anwendung zur Separation eines Bildes auf drei frei definierbare
-Siebdruckfarben. Die Vorschau klassifiziert Bildfarben gegen acht mögliche
-Druckzustände (Papier, drei Einzelfarben, drei Zweifachüberdrucke und den
-Dreifachüberdruck).
+NiceGUI-Anwendung zur Separation eines Bildes auf eine bis fünf frei definierbare
+Siebdruckfarben. Die Vorschau klassifiziert Bildfarben gegen alle möglichen
+Druckzustände – von zwei Zuständen bei einer Farbe bis zu 32 Zuständen bei fünf
+Farben.
 
 ## Start
 
@@ -20,8 +20,8 @@ Anschließend ist die Oberfläche unter <http://localhost:8080> erreichbar.
 - schnelle quantisierte ΔE00-Lookup-Tabelle für die interaktive Vorschau
 - exakte kachelweise ΔE00-Klassifikation für den Export
 - frei wählbare Druckreihenfolge, Überdruckstärke und Bias je Farbe
-- vier automatisch per RGB-Alphamischung angenäherte oder manuell gemessene
-  Mischfarben
+- automatisch per RGB-Alphamischung angenäherte oder manuell referenzierte
+  Mischfarben für alle Überdruckkombinationen
 - CMYK-Eingabe oder Auswahl aus einer lokalen JSON-Farbbibliothek
 - nicht-destruktive Helligkeits- und Kontrastkorrektur des Eingabebildes
 
