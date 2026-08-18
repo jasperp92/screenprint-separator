@@ -6,11 +6,11 @@ from screenprint_separator.ui.main_view import MainView
 
 
 def main() -> None:
-    MainView()
     is_packaged = getattr(sys, "frozen", False)
     use_native_window = is_packaged and sys.platform == "darwin"
 
     ui.run(
+        root=MainView,
         title="Screenprint Separator",
         reload=not is_packaged,
         uvicorn_reload_dirs="src",

@@ -80,7 +80,7 @@ und `pywebview` werden von `uv` nur für diesen Build bereitgestellt:
 uv run --with pyinstaller --with pywebview nicegui-pack \
   --name ScreenprintSeparator \
   --windowed \
-  --onefile \
+  --onedir \
   --clean \
   --noconfirm \
   --add-data "color_library.json:." \
