@@ -76,3 +76,8 @@ def build_overprint_palette(
                 )
 
     return OverprintPalette(tuple(names), masks, rgb, lab)
+
+
+def mixed_state_indices() -> tuple[int, ...]:
+    """Palette states which contain two or three inks."""
+    return (4, 5, 6, 7)

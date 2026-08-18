@@ -9,24 +9,27 @@ from screenprint_separator.export.plate_exporter import export_project
 from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.project import Project
 from screenprint_separator.models.settings import Settings
+from screenprint_separator.persistence import SessionStore
+from screenprint_separator.processing.color_converter import ColorConverter
 from screenprint_separator.processing.color_library import (
     ColorEntry,
     ColorLibrary,
     color_from_cmyk,
 )
 from screenprint_separator.processing.image_loader import ImageLoader
-from screenprint_separator.processing.pipeline import SeparationResult, process_image
+from screenprint_separator.processing.palette import (
+    build_overprint_palette,
+    mixed_state_indices,
+)
+from screenprint_separator.processing.pipeline import (
+    SeparationResult,
+    adjust_input_image,
+    process_image,
+)
 
 
 def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{value:02x}" for value in rgb)
-
-
-def _hex_to_rgb(value: str) -> tuple[int, int, int]:
-    color = value.strip().lstrip("#")
-    if len(color) != 6:
-        raise ValueError("Eine Farbe muss sechs Hex-Zeichen enthalten.")
-    return tuple(int(color[index:index + 2], 16) for index in (0, 2, 4))
 
 
 def _ink_from_cmyk(
@@ -80,15 +83,20 @@ class MainView:
                 _ink_from_cmyk("Farbe 3", (22.0, 16.0, 0.0, 0.0)),
             ]
         )
-        self.project = Project(
+        fallback_project = Project(
             settings=settings,
             inks=default_inks,
         )
+        self.session_store = SessionStore(library_path.parent)
+        self.project, self._cached_filename = self.session_store.load(fallback_project)
         self._preview_busy = False
         self._preview_dirty = False
-        self._ink_titles: dict[int, object] = {}
         self._ink_controls: dict[int, dict[str, object]] = {}
         self._plate_previews: list[tuple[Ink, object]] = []
+        self._mixture_controls: dict[int, dict[str, object]] = {}
+        self._syncing_mixture_controls = False
+        self._syncing_paper_controls = False
+        self._syncing_preview_size = False
 
         ui.add_css(
             """
@@ -96,23 +104,48 @@ class MainView:
             .settings-card { background: white; border: 1px solid #ded8cc; }
             .preview-card { background: #252525; color: white; min-height: 420px; }
             .preview-image > img { object-fit: contain !important; }
+            .input-uploader .q-uploader__list { display: none; }
+            .warm-control {
+                background: #fffdf8 !important;
+                border: 1px solid #ded8cc !important;
+                box-shadow: 0 2px 8px rgba(91, 72, 43, .11);
+            }
+            .warm-control:hover { border-color: #cbbfae !important; }
+            .export-settings .q-field__label,
+            .export-settings .q-field__native,
+            .export-settings .q-field__input,
+            .export-settings .q-field__marginal,
+            .export-settings .q-field__suffix,
+            .export-settings .q-field__prefix { color: white !important; }
+            .export-settings .q-field__control:before {
+                border-color: rgba(255, 255, 255, .35) !important;
+            }
+            .ink-drag-handle { cursor: grab; touch-action: none; }
+            .ink-drag-handle:active { cursor: grabbing; }
+            .layout-column { flex: 1 1 0; min-width: 280px; }
+            .simulation-column { flex: 2 1 0; min-width: 460px; }
             """
         )
 
-        with ui.column().classes("w-full max-w-[1500px] mx-auto p-4 gap-4"):
+        with ui.column().classes("w-full max-w-[1900px] mx-auto p-4 gap-4"):
             ui.label("Screenprint Separator").classes("text-3xl font-bold")
             ui.label(
-                "Drei Druckfarben · acht Überdruckzustände · LAB/ΔE00"
+                "Drei Druckfarben · acht Überdruckzustände"
             ).classes("text-grey-7")
 
-            with ui.row().classes("w-full items-start gap-4 flex-wrap lg:flex-nowrap"):
+            with ui.row().classes("w-full items-start gap-4 flex-wrap xl:flex-nowrap"):
                 with ui.column().classes(
-                    "settings-card rounded-xl p-4 gap-4 w-full lg:w-[430px] shrink-0"
+                    "settings-card layout-column rounded-xl p-4 gap-4 w-full"
                 ):
-                    self._build_settings()
+                    self._build_input_output_settings()
 
                 with ui.column().classes(
-                    "preview-card rounded-xl p-4 gap-3 w-full grow min-w-0"
+                    "settings-card layout-column rounded-xl p-4 gap-4 w-full"
+                ):
+                    self._build_ink_settings()
+
+                with ui.column().classes(
+                    "preview-card simulation-column rounded-xl p-4 gap-3 w-full"
                 ):
                     self._build_preview()
 
@@ -122,75 +155,58 @@ class MainView:
             active=False,
             immediate=False,
         )
+        self._restore_cached_image()
 
-    def _build_settings(self) -> None:
-        ui.label("Einstellungen").classes("text-xl font-semibold")
+    def _build_input_output_settings(self) -> None:
+        ui.label("Eingabe").classes("text-xl font-semibold")
         self.upload = ui.upload(
             label="Bild laden",
             on_upload=self.load_image,
             auto_upload=True,
-        ).props("accept=.png,.jpg,.jpeg,.tif,.tiff flat bordered").classes("w-full")
+        ).props(
+            "accept=.png,.jpg,.jpeg,.tif,.tiff flat bordered no-thumbnails"
+        ).classes("w-full input-uploader")
 
-        with ui.expansion("Druckformat", icon="straighten").classes("w-full"):
-            with ui.row().classes("w-full"):
-                ui.number(
-                    "Breite (cm)",
-                    value=self.project.settings.print_width_cm,
-                    min=1,
-                    on_change=lambda event: self._change_setting(
-                        "print_width_cm", event.value, float, False
-                    ),
-                ).classes("grow")
-                ui.number(
-                    "Höhe (cm)",
-                    value=self.project.settings.print_height_cm,
-                    min=1,
-                    on_change=lambda event: self._change_setting(
-                        "print_height_cm", event.value, float, False
-                    ),
-                ).classes("grow")
-            with ui.row().classes("w-full"):
-                ui.number(
-                    "Arbeits-DPI",
-                    value=self.project.settings.dpi,
-                    min=72,
-                    on_change=lambda event: self._change_setting(
-                        "dpi", event.value, int, False
-                    ),
-                ).classes("grow")
-                ui.number(
-                    "Ausgabe-DPI",
-                    value=self.project.settings.output_dpi,
-                    min=72,
-                    on_change=lambda event: self._change_setting(
-                        "output_dpi", event.value, int, False
-                    ),
-                ).classes("grow")
-            ui.select(
-                {"fit": "Format füllen", "pad": "Einpassen mit Rand"},
-                label="Skalierung",
-                value=self.project.settings.resize_mode,
-                on_change=lambda event: self._change_setting(
-                    "resize_mode", event.value, str, False
+        with ui.column().classes(
+            "w-full gap-2 rounded-lg bg-green-1 text-green-9 p-2"
+        ) as upload_status:
+            self.input_preview = ui.image("").classes("w-full rounded-md")
+            with ui.row().classes("w-full items-center gap-2 px-1"):
+                ui.icon("check_circle").classes("text-green-7")
+                self.upload_status_text = ui.label().classes("grow text-sm")
+                ui.label("100 %").classes("text-sm font-medium")
+            self.input_size = ui.label().classes("text-xs text-green-9 px-1")
+        self.upload_status = upload_status
+        self.upload_status.set_visibility(False)
+
+        with ui.expansion("Bildbearbeitung", icon="tune").classes(
+            "w-full"
+        ):
+            ui.label("Helligkeit").classes("text-sm")
+            ui.slider(
+                min=0.25,
+                max=2.0,
+                step=0.01,
+                value=self.project.settings.brightness,
+                on_change=lambda event: self._change_input_tone(
+                    "brightness", event.value
                 ),
-            ).classes("w-full")
+            ).props("label-always")
 
-        with ui.expansion("Papier und Oberfläche", icon="texture").classes("w-full"):
-            self.paper_select = ui.select(
-                self._paper_options(),
-                label="Bedruckstoff / Papierfarbe",
-                value=self.project.settings.paper_id,
-                on_change=self._change_paper_selection,
-            ).classes("w-full")
-            self.custom_paper_input = ui.color_input(
-                "Eigene Papierfarbe",
-                value=_rgb_to_hex(self.project.settings.paper),
-                preview=True,
-                on_change=self._change_custom_paper,
-            ).classes("w-full")
-            self.custom_paper_input.set_visibility(
-                self.project.settings.paper_id == "custom"
-            )
+            ui.label("Kontrast").classes("text-sm")
+            ui.slider(
+                min=0.25,
+                max=2.0,
+                step=0.01,
+                value=self.project.settings.contrast,
+                on_change=lambda event: self._change_input_tone(
+                    "contrast", event.value
+                ),
+            ).props("label-always")
+
+        with ui.expansion("Textur und Glättung", icon="texture").classes(
+            "w-full"
+        ):
             ui.label("Erhalt der Originaltextur").classes("text-sm")
             ui.slider(
                 min=0.0,
@@ -220,62 +236,137 @@ class MainView:
                 ),
             ).classes("w-full")
 
-        ui.separator()
-        ui.label("Druckfarben").classes("text-lg font-semibold")
+        with ui.expansion("Simulationsvorschau", icon="photo_size_select_large").classes(
+            "w-full"
+        ):
+            ui.label(
+                "Breite und Höhe bleiben im Seitenverhältnis des Eingabebildes."
+            ).classes("text-xs text-grey-7")
+            with ui.row().classes("w-full gap-2"):
+                self.preview_width_input = ui.number(
+                    "Breite (px)",
+                    value=self.project.settings.preview_width,
+                    min=50,
+                    max=5000,
+                    step=1,
+                    on_change=lambda event: self._change_preview_dimension(
+                        "width", event.value
+                    ),
+                ).classes("grow")
+                self.preview_height_input = ui.number(
+                    "Höhe (px)",
+                    value=self.project.settings.preview_height,
+                    min=50,
+                    max=5000,
+                    step=1,
+                    on_change=lambda event: self._change_preview_dimension(
+                        "height", event.value
+                    ),
+                ).classes("grow")
+            self.preview_width_input.set_enabled(self.project.image is not None)
+            self.preview_height_input.set_enabled(self.project.image is not None)
+
+    def _build_ink_settings(self) -> None:
+        ui.label("Druckfarben").classes("text-xl font-semibold")
+
+        paper_card = ui.expansion().props("dense expand-separator").classes(
+            "warm-control w-full rounded-lg"
+        )
+        with (
+            paper_card.add_slot("header"),
+            ui.row().classes("w-full items-center gap-2 no-wrap"),
+        ):
+            ui.label("Papier").classes("font-medium w-16 shrink-0")
+            self.paper_swatch = ui.element("div").classes("shrink-0")
+            self.paper_summary = ui.label().classes("text-sm grow truncate")
+        with paper_card:
+            self.paper_source = ui.toggle(
+                {"library": "Papier", "lab": "LAB-Referenzfarbe"},
+                value=self.project.settings.paper_source,
+                on_change=self._change_paper_source,
+            ).props("spread no-caps").classes("w-full")
+            with ui.column().classes("w-full px-2 pb-2") as paper_library_group:
+                self.paper_select = ui.select(
+                    self._paper_options(),
+                    label="Papier aus JSON",
+                    value=self.project.settings.paper_id,
+                    on_change=self._change_paper_selection,
+                ).classes("w-full")
+            with (
+                ui.column().classes("w-full px-2 pb-2") as paper_lab_group,
+                ui.row().classes("w-full gap-2"),
+            ):
+                self.paper_lab_inputs = []
+                for component, (caption, minimum, maximum) in enumerate(
+                    (("L*", 0, 100), ("a*", -128, 127), ("b*", -128, 127))
+                ):
+                    field = ui.number(
+                        caption,
+                        value=self.project.settings.paper_lab[component],
+                        min=minimum,
+                        max=maximum,
+                        step=0.1,
+                        on_change=lambda event, component=component: (
+                            self._change_paper_lab(component, event.value)
+                        ),
+                    ).classes("grow min-w-[70px]")
+                    self.paper_lab_inputs.append(field)
+            self.paper_library_group = paper_library_group
+            self.paper_lab_group = paper_lab_group
+        self._sync_paper_controls()
+
         ui.label(
             "CMYK direkt eingeben oder eine Farbe aus color_library.json wählen."
         ).classes("text-xs text-grey-7")
 
-        for ink in list(self.project.inks):
-            self._build_ink_controls(ink)
+        with ui.column().classes("w-full gap-3") as ink_cards:
+            self.ink_cards = ink_cards
+            for ink in list(self.project.inks):
+                self._build_ink_controls(ink)
+        self.ink_cards.make_sortable(
+            handle=".ink-drag-handle",
+            on_end=self._drag_ink,
+            ghost_class="opacity-40",
+        )
 
         self.order_label = ui.label().classes("text-sm font-medium")
         self._update_order_label()
+        self._build_overprint_controls()
         ui.button(
             "Farbbibliothek neu laden",
             icon="refresh",
             on_click=self._reload_color_library,
         ).props("flat dense")
 
-        ui.separator()
-        self.export_button = ui.button(
-            "Simulation und Platten exportieren",
-            icon="download",
-            on_click=self.export,
-        ).classes("w-full")
-        self.export_button.disable()
-
     def _build_ink_controls(self, ink: Ink) -> None:
-        with ui.card().classes("w-full p-3 gap-2"):
-            with ui.row().classes("w-full items-center"):
-                title = ui.label(ink.name).classes("font-semibold grow")
-                self._ink_titles[id(ink)] = title
-                ui.button(
-                    icon="arrow_upward",
-                    on_click=lambda ink=ink: self._move_ink(ink, -1),
-                ).props("flat dense round")
-                ui.button(
-                    icon="arrow_downward",
-                    on_click=lambda ink=ink: self._move_ink(ink, 1),
-                ).props("flat dense round")
+        card = ui.expansion().props("dense expand-separator").classes(
+            "warm-control w-full rounded-lg"
+        )
+        with (
+            card.add_slot("header"),
+            ui.row().classes("w-full items-center gap-2 no-wrap"),
+        ):
+                ui.icon("drag_indicator").classes(
+                    "ink-drag-handle text-grey-6 shrink-0"
+                )
+                number = ui.label().classes("font-semibold w-5 shrink-0")
+                summary_swatch = ui.element("div").classes("shrink-0")
+                summary = ui.label().classes("text-sm grow truncate")
+                opacity_label = ui.label().classes("text-sm font-medium shrink-0")
 
-            source_select = ui.select(
+        with card:
+            source_select = ui.toggle(
                 {
-                    "cmyk": "CMYK eingeben",
-                    "library": "Pantone / Farbbibliothek",
+                    "library": "Pantone",
+                    "cmyk": "CMYK",
                 },
-                label="Farbquelle",
                 value=ink.color_source,
                 on_change=lambda event, ink=ink: self._change_ink_source(
                     ink, event.value
                 ),
-            ).classes("w-full")
+            ).props("spread no-caps").classes("w-full")
 
-            swatch = ui.element("div").style(
-                self._swatch_style(ink.rgb_preview)
-            ).classes("w-full")
-
-            with ui.column().classes("w-full gap-2") as cmyk_group:
+            with ui.column().classes("w-full gap-2 px-2") as cmyk_group:
                 name_input = ui.input(
                     "Bezeichnung",
                     value=ink.name,
@@ -298,7 +389,7 @@ class MainView:
                         ).classes("grow min-w-[65px]")
                         cmyk_inputs.append(field)
 
-            with ui.column().classes("w-full gap-1") as library_group:
+            with ui.column().classes("w-full gap-1 px-2") as library_group:
                 palette_select = ui.select(
                     self._library_options(),
                     label="Pantone / gespeicherte Farbe",
@@ -308,12 +399,17 @@ class MainView:
                         ink, event.value
                     ),
                 ).classes("w-full")
-                ui.label(
-                    "Pantone-LAB-Werte können aus einer lizenzierten Quelle "
-                    "in color_library.json eingetragen werden."
-                ).classes("text-[11px] text-grey-7")
+
+            swatch = ui.element("div").style(
+                self._swatch_style(ink.rgb_preview)
+            ).classes("mx-2")
 
             self._ink_controls[id(ink)] = {
+                "card": card,
+                "number": number,
+                "summary_swatch": summary_swatch,
+                "summary": summary,
+                "opacity_label": opacity_label,
                 "source": source_select,
                 "swatch": swatch,
                 "cmyk_group": cmyk_group,
@@ -324,7 +420,9 @@ class MainView:
             }
             self._sync_ink_control_visibility(ink)
 
-            ui.label("Überdruckstärke").classes("text-xs")
+            ui.label("Überdruckstärke · nur für Automatikmodus").classes(
+                "text-xs px-2"
+            )
             ui.slider(
                 min=0.0,
                 max=1.0,
@@ -333,7 +431,7 @@ class MainView:
                 on_change=lambda event, ink=ink: self._change_ink_value(
                     ink, "opacity", event.value
                 ),
-            ).props("label-always")
+            ).props("label-always").classes("px-2")
             ui.label("Klassifikations-Bias (ΔE)").classes("text-xs")
             ui.slider(
                 min=-10.0,
@@ -344,18 +442,203 @@ class MainView:
                     ink, "bias", event.value
                 ),
             ).props("label-always")
+        self._update_ink_summary(ink)
+
+    def _build_overprint_controls(self) -> None:
+        ui.separator()
+        ui.label("Überdruckfarben").classes("text-lg font-semibold uppercase")
+        self._ensure_measured_overprints()
+        for heading, states in (("2 Platten", (4, 5, 6)), ("3 Platten", (7,))):
+            ui.label(heading).classes("text-xs font-medium text-grey-7 mt-1")
+            for state in states:
+                row = ui.expansion().props("dense expand-separator").classes(
+                    "warm-control w-full rounded-lg"
+                )
+                with (
+                    row.add_slot("header"),
+                    ui.row().classes("w-full items-center gap-2 no-wrap"),
+                ):
+                        combination = ui.label().classes("font-medium w-16 shrink-0")
+                        swatch = ui.element("div").classes("shrink-0")
+                        status = ui.label("Automatisch").classes("text-sm grow")
+                with row:
+                    mode = ui.toggle(
+                        {
+                            "automatic": "Automatisch",
+                            "pantone": "Pantone (JSON)",
+                            "lab": "LAB-Messwert",
+                        },
+                        value="automatic",
+                        on_change=lambda event, state=state: (
+                            self._change_overprint_state_mode(state, event.value)
+                        ),
+                    ).props("spread no-caps").classes("w-full")
+                    with ui.column().classes("w-full px-2 pb-2") as pantone_group:
+                        palette_select = ui.select(
+                            self._library_options(),
+                            label="Pantone / gespeicherte Farbe",
+                            with_input=True,
+                            on_change=lambda event, state=state: (
+                                self._change_overprint_library(state, event.value)
+                            ),
+                        ).classes("w-full")
+                    with (
+                        ui.column().classes("w-full px-2 pb-2") as lab_group,
+                        ui.row().classes("w-full gap-2"),
+                    ):
+                            lab_inputs = []
+                            for component, (caption, minimum, maximum) in enumerate(
+                                (("L*", 0, 100), ("a*", -128, 127), ("b*", -128, 127))
+                            ):
+                                field = ui.number(
+                                    caption,
+                                    min=minimum,
+                                    max=maximum,
+                                    step=0.1,
+                                    on_change=lambda event, state=state, component=component: (
+                                        self._change_mixture_lab(
+                                            state, component, event.value
+                                        )
+                                    ),
+                                ).classes("grow min-w-[70px]")
+                                lab_inputs.append(field)
+                self._mixture_controls[state] = {
+                    "combination": combination,
+                    "swatch": swatch,
+                    "status": status,
+                    "mode": mode,
+                    "pantone_group": pantone_group,
+                    "palette": palette_select,
+                    "lab_group": lab_group,
+                    "lab": lab_inputs,
+                }
+                pantone_group.set_visibility(False)
+                lab_group.set_visibility(False)
+        self._sync_overprint_controls()
+
+    def _automatic_palette(self):
+        return build_overprint_palette(
+            self.project.inks,
+            self.project.settings.paper,
+        )
+
+    def _ensure_measured_overprints(self) -> None:
+        palette = self._automatic_palette()
+        for state in mixed_state_indices():
+            self.project.measured_overprints.setdefault(
+                state,
+                tuple(float(value) for value in palette.lab[state]),
+            )
+
+    def _sync_mixture_controls(self) -> None:
+        if not self._mixture_controls:
+            return
+        self._syncing_mixture_controls = True
+        try:
+            automatic = self._automatic_palette()
+            for state, controls in self._mixture_controls.items():
+                indices = [
+                    str(index + 1)
+                    for index, active in enumerate(automatic.masks[state])
+                    if active
+                ]
+                controls["combination"].set_text("+".join(indices))
+                lab = self.project.measured_overprints[state]
+                source = self.project.overprint_sources.get(state, "automatic")
+                rgb = (
+                    ColorConverter.lab_to_rgb(np.asarray(lab, dtype=np.float32))
+                    if source != "automatic"
+                    else automatic.rgb[state]
+                )
+                rgb_tuple = tuple(int(value) for value in rgb)
+                controls["swatch"].style(
+                    replace=(
+                        f"background:{_rgb_to_hex(rgb_tuple)};width:34px;height:22px;"
+                        "border-radius:4px;border:1px solid rgba(0,0,0,.25)"
+                    )
+                )
+                status = {
+                    "automatic": "Automatisch",
+                    "pantone": "Pantone",
+                    "lab": "LAB-Messwert",
+                }[source]
+                controls["status"].set_text(status)
+                controls["mode"].set_value(source)
+                controls["pantone_group"].set_visibility(source == "pantone")
+                controls["lab_group"].set_visibility(source == "lab")
+                controls["palette"].set_value(
+                    self.project.overprint_library_ids.get(state)
+                )
+                for field, component in zip(controls["lab"], lab, strict=True):
+                    field.set_value(round(float(component), 2))
+        finally:
+            self._syncing_mixture_controls = False
+
+    def _sync_automatic_mixture_controls(self) -> None:
+        self._sync_mixture_controls()
+
+    def _sync_overprint_controls(self) -> None:
+        self._sync_mixture_controls()
+
+    def _change_overprint_state_mode(self, state: int, value: str | None) -> None:
+        if self._syncing_mixture_controls or value not in {
+            "automatic",
+            "pantone",
+            "lab",
+        }:
+            return
+        self.project.overprint_sources[state] = value
+        if value == "automatic":
+            self.project.manual_overprint_states.discard(state)
+        else:
+            self.project.manual_overprint_states.add(state)
+        self._sync_mixture_controls()
+        self.schedule_preview()
+
+    def _change_overprint_library(self, state: int, identifier: str | None) -> None:
+        if self._syncing_mixture_controls or not identifier:
+            return
+        entry = self.color_library.by_id.get(identifier)
+        if entry is None or entry.system == "paper":
+            ui.notify("Unbekannte Überdruckfarbe", type="negative")
+            return
+        self.project.overprint_library_ids[state] = identifier
+        self.project.measured_overprints[state] = entry.lab
+        self.project.overprint_sources[state] = "pantone"
+        self.project.manual_overprint_states.add(state)
+        self._sync_mixture_controls()
+        self.schedule_preview()
+
+    def _change_mixture_lab(
+        self, state: int, component: int, value: float | None
+    ) -> None:
+        if self._syncing_mixture_controls or value is None:
+            return
+        lab = list(self.project.measured_overprints[state])
+        limits = ((0.0, 100.0), (-128.0, 127.0), (-128.0, 127.0))
+        lab[component] = float(np.clip(value, *limits[component]))
+        self.project.measured_overprints[state] = tuple(lab)
+        self.project.overprint_sources[state] = "lab"
+        self.project.manual_overprint_states.add(state)
+        self._sync_mixture_controls()
+        self.schedule_preview()
 
     def _build_preview(self) -> None:
         with ui.row().classes("w-full items-center"):
-            ui.label("Simulation").classes("text-xl font-semibold grow")
-            self.preview_spinner = ui.spinner(size="lg")
-            self.preview_spinner.set_visibility(False)
+            ui.label("Simulation und Ausgabe").classes("text-xl font-semibold grow")
+            with ui.element("div").classes(
+                "w-5 h-5 shrink-0 flex items-center justify-center"
+            ):
+                self.preview_spinner = ui.spinner(size="sm")
+                self.preview_spinner.set_visibility(False)
 
         self.status = ui.label("Noch kein Bild geladen").classes("text-grey-4")
         self.preview = ui.interactive_image("").classes(
             "preview-image rounded-lg self-center"
         ).style("width: 100%; max-width: 100%")
         self.preview.set_visibility(False)
+        self.preview_size = ui.label("Vorschaugröße: –").classes("text-sm text-grey-4")
+        self.preview_size.set_visibility(False)
 
         self.palette_row = ui.row().classes("w-full gap-2 flex-wrap")
 
@@ -370,10 +653,78 @@ class MainView:
                         plate.set_visibility(False)
                         self._plate_previews.append((ink, plate))
 
+        self._build_export_settings()
+
+    def _build_export_settings(self) -> None:
         ui.separator().classes("bg-grey-7")
-        self.filename = ui.label("Datei: –")
-        self.size = ui.label("Originalgröße: –")
-        self.preview_size = ui.label("Vorschaugröße: –")
+        ui.label("Export").classes("text-lg font-semibold")
+        with ui.expansion("Druckformat und Skalierung", icon="straighten").classes(
+            "export-settings w-full text-white"
+        ):
+            with ui.row().classes("w-full"):
+                ui.number(
+                    "Breite (cm)",
+                    value=self.project.settings.print_width_cm,
+                    min=1,
+                    on_change=lambda event: self._change_export_setting(
+                        "print_width_cm", event.value, float
+                    ),
+                ).classes("grow")
+                ui.number(
+                    "Höhe (cm)",
+                    value=self.project.settings.print_height_cm,
+                    min=1,
+                    on_change=lambda event: self._change_export_setting(
+                        "print_height_cm", event.value, float
+                    ),
+                ).classes("grow")
+            with ui.row().classes("w-full"):
+                ui.number(
+                    "Arbeits-DPI",
+                    value=self.project.settings.dpi,
+                    min=72,
+                    on_change=lambda event: self._change_export_setting(
+                        "dpi", event.value, int
+                    ),
+                ).classes("grow")
+                ui.number(
+                    "Ausgabe-DPI",
+                    value=self.project.settings.output_dpi,
+                    min=72,
+                    on_change=lambda event: self._change_export_setting(
+                        "output_dpi", event.value, int
+                    ),
+                ).classes("grow")
+            ui.select(
+                {"fit": "Format füllen", "pad": "Einpassen mit Rand"},
+                label="Separationsskalierung",
+                value=self.project.settings.resize_mode,
+                on_change=lambda event: self._change_export_setting(
+                    "resize_mode", event.value, str
+                ),
+            ).classes("w-full")
+            ui.select(
+                {
+                    "nearest": "Pixelgenau (Nearest Neighbour)",
+                    "bilinear": "Bilinear",
+                    "bicubic": "Bikubisch",
+                    "lanczos": "Lanczos",
+                },
+                label="Upscaling-Algorithmus",
+                value=self.project.settings.upscale_algorithm,
+                on_change=lambda event: self._change_export_setting(
+                    "upscale_algorithm", event.value, str
+                ),
+            ).classes("w-full")
+            self.export_size_label = ui.label().classes("text-sm text-white")
+            self._update_export_size_label()
+
+        self.export_button = ui.button(
+            "Simulation und Platten exportieren",
+            icon="download",
+            on_click=self.export,
+        ).classes("w-full")
+        self.export_button.disable()
 
     def _change_setting(
         self,
@@ -385,52 +736,170 @@ class MainView:
         if value is None:
             return
         setattr(self.project.settings, name, converter(value))
+        self._save_session()
         if refresh:
             self.schedule_preview()
+
+    def _change_export_setting(
+        self,
+        name: str,
+        value: object,
+        converter: type,
+    ) -> None:
+        if value is None:
+            return
+        setattr(self.project.settings, name, converter(value))
+        self._update_export_size_label()
+        self._save_session()
+
+    def _update_export_size_label(self) -> None:
+        settings = self.project.settings
+        work_width = round(settings.print_width_cm / 2.54 * settings.dpi)
+        work_height = round(settings.print_height_cm / 2.54 * settings.dpi)
+        output_width = round(settings.print_width_cm / 2.54 * settings.output_dpi)
+        output_height = round(settings.print_height_cm / 2.54 * settings.output_dpi)
+        self.export_size_label.set_text(
+            f"Separation: {work_width} × {work_height} px · "
+            f"Ausgabe: {output_width} × {output_height} px"
+        )
+
+    def _change_input_tone(self, name: str, value: float | None) -> None:
+        if value is None:
+            return
+        setattr(self.project.settings, name, float(value))
+        self._refresh_input_preview()
+        self.schedule_preview()
+
+    def _change_preview_dimension(
+        self,
+        dimension: str,
+        value: float | None,
+    ) -> None:
+        if self._syncing_preview_size or value is None or self.project.image is None:
+            return
+        image_width, image_height = self.project.image.size
+        if dimension == "width":
+            width = int(np.clip(round(value), 50, 5000))
+            height = max(1, round(width * image_height / image_width))
+        else:
+            height = int(np.clip(round(value), 50, 5000))
+            width = max(1, round(height * image_width / image_height))
+        self._set_preview_dimensions(width, height)
+        self.schedule_preview()
+
+    def _set_preview_dimensions(self, width: int, height: int) -> None:
+        self.project.settings.preview_width = width
+        self.project.settings.preview_height = height
+        self._syncing_preview_size = True
+        try:
+            self.preview_width_input.set_value(width)
+            self.preview_height_input.set_value(height)
+        finally:
+            self._syncing_preview_size = False
+
+    def _refresh_input_preview(self) -> None:
+        if self.project.image is None:
+            return
+        preview = self.project.image.copy()
+        preview.thumbnail((800, 800), Image.Resampling.LANCZOS)
+        preview = adjust_input_image(preview, self.project.settings)
+        self.input_preview.set_source(preview)
 
     def _change_paper_selection(
         self,
         event: events.ValueChangeEventArguments,
     ) -> None:
-        identifier = event.value
-        if identifier == "custom":
-            self.project.settings.paper_id = "custom"
-            self.custom_paper_input.set_visibility(True)
-            self.schedule_preview()
+        if self._syncing_paper_controls:
             return
-
+        identifier = event.value
         entry = self.color_library.by_id.get(identifier)
         if entry is None or entry.system != "paper":
             ui.notify("Unbekannte Papierfarbe", type="negative")
             return
         self.project.settings.paper_id = entry.id
         self.project.settings.paper = entry.rgb
-        self.custom_paper_input.set_visibility(False)
+        self.project.settings.paper_lab = entry.lab
+        self.project.settings.paper_source = "library"
+        self._sync_paper_controls()
+        self._sync_automatic_mixture_controls()
         self.schedule_preview()
 
-    def _change_custom_paper(self, event: events.ValueChangeEventArguments) -> None:
-        if not event.value:
+    def _change_paper_source(self, event: events.ValueChangeEventArguments) -> None:
+        if self._syncing_paper_controls or event.value not in {"library", "lab"}:
             return
-        try:
-            self.project.settings.paper = _hex_to_rgb(event.value)
-        except ValueError as error:
-            ui.notify(str(error), type="negative")
-            return
-        self.project.settings.paper_id = "custom"
+        self.project.settings.paper_source = event.value
+        if event.value == "library":
+            entry = self.color_library.by_id.get(self.project.settings.paper_id)
+            if entry is not None and entry.system == "paper":
+                self.project.settings.paper = entry.rgb
+                self.project.settings.paper_lab = entry.lab
+        else:
+            rgb = ColorConverter.lab_to_rgb(
+                np.asarray(self.project.settings.paper_lab, dtype=np.float32)
+            )
+            self.project.settings.paper = tuple(int(value) for value in rgb)
+        self._sync_paper_controls()
+        self._sync_automatic_mixture_controls()
         self.schedule_preview()
+
+    def _change_paper_lab(self, component: int, value: float | None) -> None:
+        if self._syncing_paper_controls or value is None:
+            return
+        lab = list(self.project.settings.paper_lab)
+        limits = ((0.0, 100.0), (-128.0, 127.0), (-128.0, 127.0))
+        lab[component] = float(np.clip(value, *limits[component]))
+        self.project.settings.paper_lab = tuple(lab)
+        rgb = ColorConverter.lab_to_rgb(np.asarray(lab, dtype=np.float32))
+        self.project.settings.paper = tuple(int(component) for component in rgb)
+        self.project.settings.paper_source = "lab"
+        self._sync_paper_controls()
+        self._sync_automatic_mixture_controls()
+        self.schedule_preview()
+
+    def _sync_paper_controls(self) -> None:
+        self._syncing_paper_controls = True
+        try:
+            source = self.project.settings.paper_source
+            entry = self.color_library.by_id.get(self.project.settings.paper_id)
+            self.paper_summary.set_text(
+                entry.name
+                if source == "library" and entry is not None
+                else "LAB-Referenzfarbe"
+            )
+            self.paper_swatch.style(
+                replace=(
+                    f"background:{_rgb_to_hex(self.project.settings.paper)};"
+                    "width:34px;height:22px;border-radius:4px;"
+                    "border:1px solid rgba(0,0,0,.25)"
+                )
+            )
+            self.paper_source.set_value(source)
+            self.paper_library_group.set_visibility(source == "library")
+            self.paper_lab_group.set_visibility(source == "lab")
+            self.paper_select.set_value(self.project.settings.paper_id)
+            for field, value in zip(
+                self.paper_lab_inputs,
+                self.project.settings.paper_lab,
+                strict=True,
+            ):
+                field.set_value(round(float(value), 2))
+        finally:
+            self._syncing_paper_controls = False
 
     def _change_ink_name(self, ink: Ink, value: str | None) -> None:
         if not value:
             return
         ink.name = value
-        self._ink_titles[id(ink)].set_text(value)
+        self._update_ink_summary(ink)
         self._update_order_label()
+        self._sync_overprint_controls()
         self.schedule_preview()
 
     @staticmethod
     def _swatch_style(rgb: tuple[int, int, int]) -> str:
         return (
-            f"background:{_rgb_to_hex(rgb)};height:36px;border-radius:6px;"
+            f"background:{_rgb_to_hex(rgb)};height:36px;"
+            "width:calc(100% - 16px);border-radius:6px;"
             "border:1px solid rgba(0,0,0,.25)"
         )
 
@@ -451,13 +920,31 @@ class MainView:
             for entry in self.color_library.entries
             if entry.system == "paper"
         }
-        options["custom"] = "Eigene Papierfarbe …"
         return options
 
     def _sync_ink_control_visibility(self, ink: Ink) -> None:
         controls = self._ink_controls[id(ink)]
         controls["cmyk_group"].set_visibility(ink.color_source == "cmyk")
         controls["library_group"].set_visibility(ink.color_source == "library")
+
+    def _update_ink_summary(self, ink: Ink) -> None:
+        controls = self._ink_controls[id(ink)]
+        position = self.project.inks.index(ink)
+        controls["number"].set_text(str(position + 1))
+        if ink.color_source == "library":
+            name = ink.name
+            descriptor = name if name.upper().startswith("PANTONE") else f"PANTONE {name}"
+        else:
+            values = "/".join(f"{value:g}" for value in ink.cmyk)
+            descriptor = f"CMYK {values}"
+        controls["summary"].set_text(descriptor)
+        controls["opacity_label"].set_text(f"{round(ink.opacity * 100)} %")
+        controls["summary_swatch"].style(
+            replace=(
+                f"background:{_rgb_to_hex(ink.rgb_preview)};width:34px;height:22px;"
+                "border-radius:4px;border:1px solid rgba(0,0,0,.25)"
+            )
+        )
 
     def _change_ink_source(self, ink: Ink, value: str | None) -> None:
         if value not in {"cmyk", "library"}:
@@ -471,6 +958,8 @@ class MainView:
         elif ink.library_id in self.color_library.by_id:
             self._apply_library_entry(ink, self.color_library.by_id[ink.library_id])
         self._sync_ink_control_visibility(ink)
+        self._update_ink_summary(ink)
+        self._sync_automatic_mixture_controls()
         self.schedule_preview()
 
     def _change_ink_cmyk(
@@ -489,6 +978,8 @@ class MainView:
         ink.library_id = ""
         ink.pantone = ""
         self._update_ink_swatch(ink)
+        self._update_ink_summary(ink)
+        self._sync_automatic_mixture_controls()
         self.schedule_preview()
 
     def _change_library_color(self, ink: Ink, identifier: str | None) -> None:
@@ -499,6 +990,7 @@ class MainView:
             ui.notify(f"Unbekannte Bibliotheksfarbe: {identifier}", type="negative")
             return
         self._apply_library_entry(ink, entry)
+        self._sync_automatic_mixture_controls()
         self.schedule_preview()
 
     def _apply_library_entry(self, ink: Ink, entry: ColorEntry) -> None:
@@ -512,7 +1004,6 @@ class MainView:
             ink.cmyk = entry.cmyk
 
         controls = self._ink_controls[id(ink)]
-        self._ink_titles[id(ink)].set_text(ink.name)
         controls["name"].set_value(ink.name)
         controls["source"].set_value("library")
         controls["palette"].set_value(entry.id)
@@ -524,8 +1015,10 @@ class MainView:
             ):
                 field.set_value(component)
         self._update_ink_swatch(ink)
+        self._update_ink_summary(ink)
         self._sync_ink_control_visibility(ink)
         self._update_order_label()
+        self._sync_overprint_controls()
 
     def _update_ink_swatch(self, ink: Ink) -> None:
         self._ink_controls[id(ink)]["swatch"].style(
@@ -546,18 +1039,27 @@ class MainView:
             controls["palette"].set_options(options, value=value)
             if value:
                 self._apply_library_entry(ink, self.color_library.by_id[value])
+        for state, controls in self._mixture_controls.items():
+            identifier = self.project.overprint_library_ids.get(state)
+            value = identifier if identifier in self.color_library.by_id else None
+            controls["palette"].set_options(options, value=value)
+            if identifier and value is None:
+                self.project.overprint_library_ids.pop(state, None)
+                self.project.overprint_sources[state] = "automatic"
+                self.project.manual_overprint_states.discard(state)
 
         paper_options = self._paper_options()
         paper_id = self.project.settings.paper_id
-        if paper_id != "custom":
+        paper_entry = self.color_library.by_id.get(paper_id)
+        if paper_entry is None or paper_entry.system != "paper":
+            paper_id = "paper-bright-white"
             paper_entry = self.color_library.by_id.get(paper_id)
-            if paper_entry is None or paper_entry.system != "paper":
-                paper_id = "custom"
-                self.project.settings.paper_id = "custom"
-            else:
-                self.project.settings.paper = paper_entry.rgb
+            self.project.settings.paper_id = paper_id
+        if self.project.settings.paper_source == "library" and paper_entry is not None:
+            self.project.settings.paper = paper_entry.rgb
+            self.project.settings.paper_lab = paper_entry.lab
         self.paper_select.set_options(paper_options, value=paper_id)
-        self.custom_paper_input.set_visibility(paper_id == "custom")
+        self._sync_paper_controls()
 
         ink_count = sum(
             entry.system != "paper" for entry in self.color_library.entries
@@ -569,25 +1071,107 @@ class MainView:
             f"{ink_count} Druckfarben und {paper_count} Papierfarben geladen",
             type="positive",
         )
+        self._sync_overprint_controls()
         self.schedule_preview()
 
     def _change_ink_value(self, ink: Ink, name: str, value: float | None) -> None:
         if value is None:
             return
         setattr(ink, name, float(value))
+        if name == "opacity":
+            self._update_ink_summary(ink)
+            self._sync_automatic_mixture_controls()
         self.schedule_preview()
+
+    def _drag_ink(self, event: events.SortableEventArguments) -> None:
+        if event.old_index == event.new_index:
+            return
+        ink = self.project.inks[event.old_index]
+        direction = 1 if event.new_index > event.old_index else -1
+        while self.project.inks.index(ink) != event.new_index:
+            self._move_ink(ink, direction)
 
     def _move_ink(self, ink: Ink, direction: int) -> None:
         index = self.project.inks.index(ink)
         target = index + direction
         if not 0 <= target < len(self.project.inks):
             return
+        masks = self._automatic_palette().masks
+        measured_by_inks = {
+            frozenset(
+                id(candidate)
+                for active, candidate in zip(masks[state], self.project.inks, strict=True)
+                if active
+            ): lab
+            for state, lab in self.project.measured_overprints.items()
+        }
+        manual_ink_sets = {
+            frozenset(
+                id(candidate)
+                for active, candidate in zip(masks[state], self.project.inks, strict=True)
+                if active
+            )
+            for state in self.project.manual_overprint_states
+        }
+        source_by_inks = {
+            frozenset(
+                id(candidate)
+                for active, candidate in zip(masks[state], self.project.inks, strict=True)
+                if active
+            ): source
+            for state, source in self.project.overprint_sources.items()
+        }
+        library_by_inks = {
+            frozenset(
+                id(candidate)
+                for active, candidate in zip(masks[state], self.project.inks, strict=True)
+                if active
+            ): identifier
+            for state, identifier in self.project.overprint_library_ids.items()
+        }
         self.project.inks[index], self.project.inks[target] = (
             self.project.inks[target],
             self.project.inks[index],
         )
+        for position, ordered_ink in enumerate(self.project.inks):
+            self._ink_controls[id(ordered_ink)]["card"].move(
+                self.ink_cards,
+                position,
+            )
+            self._update_ink_summary(ordered_ink)
+        remapped_manual_states = set()
+        remapped_sources = {}
+        remapped_library_ids = {}
+        for state in mixed_state_indices():
+            key = frozenset(
+                id(candidate)
+                for active, candidate in zip(masks[state], self.project.inks, strict=True)
+                if active
+            )
+            if key in measured_by_inks:
+                self.project.measured_overprints[state] = measured_by_inks[key]
+            if key in manual_ink_sets:
+                remapped_manual_states.add(state)
+            if key in source_by_inks:
+                remapped_sources[state] = source_by_inks[key]
+            if key in library_by_inks:
+                remapped_library_ids[state] = library_by_inks[key]
+        self.project.manual_overprint_states = remapped_manual_states
+        self.project.overprint_sources = remapped_sources
+        self.project.overprint_library_ids = remapped_library_ids
         self._update_order_label()
+        self._sync_overprint_controls()
         self.schedule_preview()
+
+    def _active_measured_overprints(
+        self,
+    ) -> dict[int, tuple[float, float, float]] | None:
+        measured = {
+            state: self.project.measured_overprints[state]
+            for state in self.project.manual_overprint_states
+            if state in self.project.measured_overprints
+        }
+        return measured or None
 
     def _update_order_label(self) -> None:
         if not hasattr(self, "order_label"):
@@ -604,12 +1188,69 @@ class MainView:
             return
 
         width, height = self.project.image.size
-        self.filename.set_text(f"Datei: {event.file.name}")
-        self.size.set_text(f"Originalgröße: {width} × {height} px")
+        preview_width = self.project.settings.preview_width
+        self._set_preview_dimensions(
+            preview_width,
+            max(1, round(preview_width * height / width)),
+        )
+        self.preview_width_input.enable()
+        self.preview_height_input.enable()
+        self._cached_filename = event.file.name
+        try:
+            self.session_store.save_image(self.project.image)
+        except OSError as error:
+            ui.notify(f"Bildcache konnte nicht gespeichert werden: {error}", type="warning")
+        size = self._format_file_size(len(image_bytes))
+        self.upload_status_text.set_text(f"{event.file.name} · {size}")
+        self._refresh_input_preview()
+        self.upload_status.set_visibility(True)
+        self.input_size.set_text(f"Originalgröße: {width} × {height} px")
         self.export_button.enable()
+        self._save_session()
         await self.refresh_preview()
 
+    def _restore_cached_image(self) -> None:
+        if self.project.image is None:
+            return
+        filename = self._cached_filename or "Letztes Eingabebild"
+        try:
+            byte_count = self.session_store.image_path.stat().st_size
+            size = self._format_file_size(byte_count)
+        except OSError:
+            size = "Cache"
+        width, height = self.project.image.size
+        preview_width = self.project.settings.preview_width
+        self._set_preview_dimensions(
+            preview_width,
+            max(1, round(preview_width * height / width)),
+        )
+        self.preview_width_input.enable()
+        self.preview_height_input.enable()
+        self.upload_status_text.set_text(f"{filename} · {size}")
+        self._refresh_input_preview()
+        self.upload_status.set_visibility(True)
+        self.input_size.set_text(f"Originalgröße: {width} × {height} px")
+        self.export_button.enable()
+        self.schedule_preview()
+
+    def _save_session(self) -> None:
+        try:
+            self.session_store.save(self.project, self._cached_filename)
+        except (OSError, TypeError, ValueError):
+            pass
+
+    @staticmethod
+    def _format_file_size(size: int) -> str:
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024.0 or unit == "GB":
+                precision = 0 if unit == "B" else 1
+                return f"{value:.{precision}f} {unit}"
+            value /= 1024.0
+        return f"{size} B"
+
     def schedule_preview(self) -> None:
+        self._save_session()
         if self.project.image is None or not hasattr(self, "preview_timer"):
             return
         self._preview_dirty = True
@@ -631,7 +1272,7 @@ class MainView:
 
         self._preview_busy = True
         self.preview_spinner.set_visibility(True)
-        self.status.set_text("LAB-Klassifikation wird berechnet …")
+        self.status.set_text("Farbklassifikation wird berechnet …")
 
         try:
             result = await run.io_bound(
@@ -639,7 +1280,7 @@ class MainView:
                 self.project.image.copy(),
                 deepcopy(self.project.settings),
                 deepcopy(self.project.inks),
-                deepcopy(self.project.measured_overprints),
+                deepcopy(self._active_measured_overprints()),
             )
             if result is None:
                 return
@@ -671,13 +1312,13 @@ class MainView:
             )
         )
         self.preview_size.set_text(f"Vorschaugröße: {width} × {height} px")
+        self.preview_size.set_visibility(True)
 
         self.palette_row.clear()
         with self.palette_row:
-            for name, rgb, lab in zip(
+            for name, rgb in zip(
                 result.palette.names,
                 result.palette.rgb,
-                result.palette.lab,
                 strict=True,
             ):
                 color = _rgb_to_hex(tuple(int(value) for value in rgb))
@@ -685,9 +1326,7 @@ class MainView:
                     ui.element("div").style(
                         f"background:{color};width:48px;height:32px;border-radius:6px;"
                         "border:1px solid rgba(255,255,255,.35)"
-                    ).tooltip(
-                        f"{name}\nLAB {lab[0]:.1f}, {lab[1]:.1f}, {lab[2]:.1f}"
-                    )
+                    ).tooltip(name)
                     ui.label(name).classes("text-[10px] max-w-[90px] truncate")
 
         for ink, image_element in self._plate_previews:
@@ -716,7 +1355,7 @@ class MainView:
                 self.project.image.copy(),
                 deepcopy(self.project.settings),
                 deepcopy(self.project.inks),
-                deepcopy(self.project.measured_overprints),
+                deepcopy(self._active_measured_overprints()),
             )
             if archive is not None:
                 ui.download(archive, filename="screenprint_export.zip")

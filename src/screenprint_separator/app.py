@@ -8,9 +8,10 @@ def main() -> None:
 
     ui.run(
         title="Screenprint Separator",
-        reload=False,
+        reload=True,
+        uvicorn_reload_dirs="src",
     )
 
 
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     main()

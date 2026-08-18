@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter
 
 from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.settings import Settings
@@ -22,6 +22,12 @@ class SeparationResult:
     class_indices: np.ndarray
     channels: dict[str, np.ndarray]
     palette: OverprintPalette
+
+
+def adjust_input_image(image: Image.Image, settings: Settings) -> Image.Image:
+    """Apply the non-destructive input tone controls."""
+    adjusted = ImageEnhance.Brightness(image).enhance(settings.brightness)
+    return ImageEnhance.Contrast(adjusted).enhance(settings.contrast)
 
 
 def smooth_texture(image: Image.Image, settings: Settings) -> Image.Image:
@@ -65,10 +71,14 @@ def process_image(
     preview: bool = True,
 ) -> SeparationResult:
     working = (
-        PreviewProcessor.create_working_image(image, settings.preview_max_size)
+        PreviewProcessor.create_working_image(
+            image,
+            (settings.preview_width, settings.preview_height),
+        )
         if preview
         else image.copy()
     )
+    working = adjust_input_image(working, settings)
     working = smooth_texture(working, settings)
     rgb = np.asarray(working, dtype=np.uint8)
     palette = build_overprint_palette(inks, settings.paper, measured_lab)

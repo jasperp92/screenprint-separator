@@ -13,7 +13,11 @@ from screenprint_separator.models.settings import Settings
 from screenprint_separator.processing.color_classifier import ColorClassifier
 from screenprint_separator.processing.color_converter import ColorConverter
 from screenprint_separator.processing.palette import build_overprint_palette
-from screenprint_separator.processing.pipeline import smooth_classes, smooth_texture
+from screenprint_separator.processing.pipeline import (
+    adjust_input_image,
+    smooth_classes,
+    smooth_texture,
+)
 from screenprint_separator.processing.simulation import Simulation
 
 
@@ -34,6 +38,19 @@ def _output_size(settings: Settings) -> tuple[int, int]:
         round(settings.print_width_cm / 2.54 * settings.output_dpi),
         round(settings.print_height_cm / 2.54 * settings.output_dpi),
     )
+
+
+def _upscale_resampling(settings: Settings) -> Image.Resampling:
+    algorithms = {
+        "nearest": Image.Resampling.NEAREST,
+        "bilinear": Image.Resampling.BILINEAR,
+        "bicubic": Image.Resampling.BICUBIC,
+        "lanczos": Image.Resampling.LANCZOS,
+    }
+    try:
+        return algorithms[settings.upscale_algorithm]
+    except KeyError as error:
+        raise ValueError("Unbekannter Upscaling-Algorithmus.") from error
 
 
 def _resize_for_print(image: Image.Image, settings: Settings) -> Image.Image:
@@ -98,6 +115,7 @@ def export_project(
 ) -> Path:
     export_dir = Path(tempfile.mkdtemp(prefix="screenprint_separator_"))
     work_image = _resize_for_print(image, settings)
+    work_image = adjust_input_image(work_image, settings)
     palette = build_overprint_palette(inks, settings.paper, measured_lab)
     classifier = ColorClassifier(palette, [ink.bias for ink in inks])
     labels_path = export_dir / "classification.dat"
@@ -122,7 +140,7 @@ def export_project(
             )
         plate = ImageOps.invert(active_image).resize(
             output_size,
-            resample=Image.Resampling.NEAREST,
+            resample=_upscale_resampling(settings),
         )
         plate = plate.point(
             lambda value: 255 if value >= settings.threshold else 0,

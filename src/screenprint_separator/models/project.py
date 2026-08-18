@@ -23,3 +23,6 @@ class Project:
     measured_overprints: dict[int, tuple[float, float, float]] = field(
         default_factory=dict
     )
+    manual_overprint_states: set[int] = field(default_factory=set)
+    overprint_sources: dict[int, str] = field(default_factory=dict)
+    overprint_library_ids: dict[int, str] = field(default_factory=dict)

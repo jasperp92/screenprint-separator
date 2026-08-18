@@ -20,7 +20,10 @@ Anschließend ist die Oberfläche unter <http://localhost:8080> erreichbar.
 - schnelle quantisierte ΔE00-Lookup-Tabelle für die interaktive Vorschau
 - exakte kachelweise ΔE00-Klassifikation für den Export
 - frei wählbare Druckreihenfolge, Überdruckstärke und Bias je Farbe
+- vier automatisch per RGB-Alphamischung angenäherte oder manuell gemessene
+  Mischfarben
 - CMYK-Eingabe oder Auswahl aus einer lokalen JSON-Farbbibliothek
+- nicht-destruktive Helligkeits- und Kontrastkorrektur des Eingabebildes
 
 ## CMYK und Pantone
 
@@ -66,6 +69,18 @@ Zusätzlich bietet das Dropdown „Eigene Papierfarbe …“. Diese Auswahl blen
 einen Farbwähler ein und verwendet die gewählte Farbe für den unbedruckten
 Hintergrund, die Papier-Klasse und gegebenenfalls freie Ränder beim Einpassen.
 
+## Mischfarben
+
+Im Modus „Selbst finden“ werden die drei Zweifachüberdrucke und der
+Dreifachüberdruck im RGB-Raum angenähert. Die Reihenfolge der Druckfarben legt
+dabei fest, welche Farbe oben liegt; deren „Überdruckstärke“ ist der Alpha-Wert.
+
+Im Modus „Eigene Messfarben“ lassen sich für alle vier Mischzustände entweder
+eine Bildschirmfarbe oder gemessene CIELAB-D50-Werte eingeben. Diese Werte
+ersetzen die Näherung sowohl bei der Klassifikation als auch in Simulation und
+Export. Beim Umsortieren der Druckfarben bleiben Messwerte ihrer jeweiligen
+Farbkombination zugeordnet.
+
 ## Export
 
 Der ZIP-Export enthält:
@@ -76,3 +91,10 @@ Der ZIP-Export enthält:
 
 Die TIFF-Platten selbst sind absichtlich Schwarz-Weiß-Bitmaps. LAB-Werte werden
 für Klassifikation und Simulation verwendet und im Projektmanifest gespeichert.
+
+## Sitzungswiederherstellung
+
+Die Anwendung speichert die letzten Einstellungen und das zuletzt geladene Bild
+lokal unter `.screenprint_separator_cache/`. Nach einem Neustart oder Hot Reload
+werden Farben, Reihenfolge, Regler, Überdruckquellen und Eingabebild automatisch
+wiederhergestellt. Der Cache ist über `.gitignore` vom Repository ausgeschlossen.

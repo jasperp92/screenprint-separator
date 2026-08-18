@@ -1,0 +1,89 @@
+import json
+from dataclasses import asdict, fields
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+from screenprint_separator.models.ink import Ink
+from screenprint_separator.models.project import Project
+from screenprint_separator.models.settings import Settings
+
+
+class SessionStore:
+    def __init__(self, root: Path) -> None:
+        self.directory = root / ".screenprint_separator_cache"
+        self.state_path = self.directory / "session.json"
+        self.image_path = self.directory / "input.png"
+
+    def load(self, fallback: Project) -> tuple[Project, str | None]:
+        if not self.state_path.exists():
+            return fallback, None
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            allowed_settings = {field.name for field in fields(Settings)}
+            settings_data = {
+                key: value
+                for key, value in data.get("settings", {}).items()
+                if key in allowed_settings
+            }
+            for key in ("paper", "paper_lab"):
+                if key in settings_data:
+                    settings_data[key] = tuple(settings_data[key])
+            settings = Settings(**settings_data)
+
+            inks = []
+            for values in data.get("inks", []):
+                values = dict(values)
+                for key in ("lab", "rgb_preview", "cmyk"):
+                    values[key] = tuple(values[key])
+                inks.append(Ink(**values))
+            if len(inks) != 3:
+                inks = fallback.inks
+
+            project = Project(settings=settings, inks=inks)
+            project.measured_overprints = {
+                int(state): tuple(values)
+                for state, values in data.get("measured_overprints", {}).items()
+            }
+            project.manual_overprint_states = {
+                int(state) for state in data.get("manual_overprint_states", [])
+            }
+            project.overprint_sources = {
+                int(state): source
+                for state, source in data.get("overprint_sources", {}).items()
+            }
+            project.overprint_library_ids = {
+                int(state): identifier
+                for state, identifier in data.get("overprint_library_ids", {}).items()
+            }
+            if self.image_path.exists():
+                with Image.open(self.image_path) as cached:
+                    project.image = cached.convert("RGB")
+                project.rgb_array = np.asarray(project.image)
+            return project, data.get("filename")
+        except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+            return fallback, None
+
+    def save(self, project: Project, filename: str | None) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "filename": filename,
+            "settings": asdict(project.settings),
+            "inks": [asdict(ink) for ink in project.inks],
+            "measured_overprints": project.measured_overprints,
+            "manual_overprint_states": sorted(project.manual_overprint_states),
+            "overprint_sources": project.overprint_sources,
+            "overprint_library_ids": project.overprint_library_ids,
+        }
+        temporary = self.state_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(self.state_path)
+
+    def save_image(self, image: Image.Image) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        image.save(self.image_path, format="PNG")
