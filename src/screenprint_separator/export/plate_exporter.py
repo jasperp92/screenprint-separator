@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import tempfile
 import zipfile
 from dataclasses import asdict
@@ -107,6 +108,14 @@ def _classify_tiled(
     return labels
 
 
+def _close_memmap(array: np.memmap) -> None:
+    """Flush and release the OS mapping immediately instead of waiting for GC."""
+    array.flush()
+    mapping = getattr(array, "_mmap", None)
+    if mapping is not None:
+        mapping.close()
+
+
 def export_project(
     image: Image.Image,
     settings: Settings,
@@ -114,78 +123,119 @@ def export_project(
     measured_lab: dict[int, tuple[float, float, float]] | None = None,
 ) -> Path:
     export_dir = Path(tempfile.mkdtemp(prefix="screenprint_separator_"))
-    work_image = _resize_for_print(image, settings)
-    work_image = adjust_input_image(work_image, settings)
-    palette = build_overprint_palette(inks, settings.paper, measured_lab)
-    classifier = ColorClassifier(palette, [ink.bias for ink in inks])
     labels_path = export_dir / "classification.dat"
-    labels = _classify_tiled(work_image, classifier, settings, labels_path)
+    labels: np.memmap | None = None
+    work_image: Image.Image | None = None
+    try:
+        resized = _resize_for_print(image, settings)
+        try:
+            work_image = adjust_input_image(resized, settings)
+        finally:
+            resized.close()
 
-    simulation_path = export_dir / "simulation.png"
-    Simulation.render(labels, palette).save(
-        simulation_path,
-        dpi=(settings.dpi, settings.dpi),
-    )
+        palette = build_overprint_palette(inks, settings.paper, measured_lab)
+        classifier = ColorClassifier(palette, [ink.bias for ink in inks])
+        labels = _classify_tiled(work_image, classifier, settings, labels_path)
+        work_image.close()
+        work_image = None
 
-    output_size = _output_size(settings)
-    plate_paths = []
-    active_states = palette.masks[np.asarray(labels)]
-
-    for channel, ink in enumerate(inks):
-        active = (active_states[..., channel] * 255).astype(np.uint8)
-        active_image = Image.fromarray(active, mode="L")
-        if settings.trapping_px > 0:
-            active_image = active_image.filter(
-                ImageFilter.MaxFilter(size=settings.trapping_px * 2 + 1)
+        simulation_path = export_dir / "simulation.png"
+        simulation = Simulation.render(labels, palette)
+        try:
+            simulation.save(
+                simulation_path,
+                dpi=(settings.dpi, settings.dpi),
             )
-        plate = ImageOps.invert(active_image).resize(
-            output_size,
-            resample=_upscale_resampling(settings),
+        finally:
+            simulation.close()
+
+        output_size = _output_size(settings)
+        plate_paths = []
+        for channel, ink in enumerate(inks):
+            # Index only one channel at a time.  Indexing all masks at once creates
+            # an H x W x ink-count allocation (hundreds of MB at production DPI).
+            channel_states = np.asarray(
+                palette.masks[:, channel], dtype=np.uint8
+            ) * np.uint8(255)
+            active = np.empty(labels.shape, dtype=np.uint8)
+            np.take(channel_states, labels, out=active)
+            active_image = Image.fromarray(active, mode="L")
+            del active
+
+            if settings.trapping_px > 0:
+                trapped = active_image.filter(
+                    ImageFilter.MaxFilter(size=settings.trapping_px * 2 + 1)
+                )
+                active_image.close()
+                active_image = trapped
+
+            inverted = ImageOps.invert(active_image)
+            active_image.close()
+            resized_plate = inverted.resize(
+                output_size,
+                resample=_upscale_resampling(settings),
+            )
+            inverted.close()
+            plate = resized_plate.point(
+                lambda value: 255 if value >= settings.threshold else 0,
+                mode="1",
+            )
+            resized_plate.close()
+            try:
+                plate_path = (
+                    export_dir / f"platte_{channel + 1}_{_safe_name(ink.name)}.tif"
+                )
+                plate.save(
+                    plate_path,
+                    format="TIFF",
+                    dpi=(settings.output_dpi, settings.output_dpi),
+                    compression="group4",
+                )
+            finally:
+                plate.close()
+            plate_paths.append(plate_path)
+
+        manifest = {
+            "format": "screenprint-separator-project-v1",
+            "settings": asdict(settings),
+            "print_order": [ink.name for ink in inks],
+            "inks": [asdict(ink) for ink in inks],
+            "palette": [
+                {
+                    "state": index,
+                    "name": palette.names[index],
+                    "mask": palette.masks[index].tolist(),
+                    "rgb": palette.rgb[index].tolist(),
+                    "lab_d50": [round(float(value), 4) for value in palette.lab[index]],
+                    "measured": index in (measured_lab or {}),
+                }
+                for index in range(len(palette.names))
+            ],
+        }
+        manifest_path = export_dir / "projekt.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
-        plate = plate.point(
-            lambda value: 255 if value >= settings.threshold else 0,
-            mode="1",
-        )
-        plate_path = export_dir / f"platte_{channel + 1}_{_safe_name(ink.name)}.tif"
-        plate.save(
-            plate_path,
-            format="TIFF",
-            dpi=(settings.output_dpi, settings.output_dpi),
-            compression="group4",
-        )
-        plate_paths.append(plate_path)
 
-    manifest = {
-        "format": "screenprint-separator-project-v1",
-        "settings": asdict(settings),
-        "print_order": [ink.name for ink in inks],
-        "inks": [asdict(ink) for ink in inks],
-        "palette": [
-            {
-                "state": index,
-                "name": palette.names[index],
-                "mask": palette.masks[index].tolist(),
-                "rgb": palette.rgb[index].tolist(),
-                "lab_d50": [round(float(value), 4) for value in palette.lab[index]],
-                "measured": index in (measured_lab or {}),
-            }
-            for index in range(len(palette.names))
-        ],
-    }
-    manifest_path = export_dir / "projekt.json"
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+        _close_memmap(labels)
+        labels = None
+        labels_path.unlink(missing_ok=True)
 
-    del active_states
-    labels.flush()
-    del labels
-    labels_path.unlink(missing_ok=True)
+        archive_path = export_dir / "screenprint_export.zip"
+        with zipfile.ZipFile(
+            archive_path, "w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
+            for path in [simulation_path, manifest_path, *plate_paths]:
+                archive.write(path, path.name)
 
-    archive_path = export_dir / "screenprint_export.zip"
-    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in [simulation_path, manifest_path, *plate_paths]:
-            archive.write(path, path.name)
-
-    return archive_path
+        return archive_path
+    except Exception:
+        shutil.rmtree(export_dir, ignore_errors=True)
+        raise
+    finally:
+        if work_image is not None:
+            work_image.close()
+        if labels is not None:
+            _close_memmap(labels)
+        labels_path.unlink(missing_ok=True)

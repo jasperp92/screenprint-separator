@@ -27,7 +27,10 @@ class SeparationResult:
 def adjust_input_image(image: Image.Image, settings: Settings) -> Image.Image:
     """Apply the non-destructive input tone controls."""
     adjusted = ImageEnhance.Brightness(image).enhance(settings.brightness)
-    return ImageEnhance.Contrast(adjusted).enhance(settings.contrast)
+    try:
+        return ImageEnhance.Contrast(adjusted).enhance(settings.contrast)
+    finally:
+        adjusted.close()
 
 
 def smooth_texture(image: Image.Image, settings: Settings) -> Image.Image:

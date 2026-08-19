@@ -16,6 +16,7 @@ from screenprint_separator.processing.color_library import (
     ColorEntry,
     ColorLibrary,
     color_from_cmyk,
+    rgb_to_cmyk,
 )
 from screenprint_separator.processing.image_loader import ImageLoader
 from screenprint_separator.processing.palette import (
@@ -109,6 +110,7 @@ class MainView:
         self._mixture_controls: dict[int, dict[str, object]] = {}
         self._syncing_mixture_controls = False
         self._syncing_paper_controls = False
+        self._syncing_ink_controls = False
         self._syncing_preview_size = False
 
         ui.add_css(
@@ -135,6 +137,34 @@ class MainView:
             }
             .ink-drag-handle { cursor: grab; touch-action: none; }
             .ink-drag-handle:active { cursor: grabbing; }
+            .ink-card > .q-expansion-item__container > .q-item {
+                min-width: 0;
+                padding-left: 8px;
+                padding-right: 4px;
+            }
+            .ink-card > .q-expansion-item__container > .q-item
+            > .q-item__section--main {
+                min-width: 0;
+                overflow: hidden;
+            }
+            .ink-card > .q-expansion-item__container > .q-item
+            > .q-item__section--side {
+                min-width: 24px;
+                padding-left: 2px;
+                padding-right: 0;
+            }
+            .ink-card-header {
+                width: 100%;
+                min-width: 0;
+                max-width: 100%;
+                overflow: hidden;
+            }
+            .ink-card-summary {
+                min-width: 0;
+                overflow: hidden;
+                white-space: nowrap;
+                text-overflow: ellipsis;
+            }
             .layout-column { flex: 1 1 0; min-width: 280px; }
             .simulation-column { flex: 2 1 0; min-width: 460px; }
             """
@@ -246,11 +276,18 @@ class MainView:
             ).props("label-always")
             self._build_info_label(
                 "Klassenglättung",
-                "Glättet die fertig zugeordneten Farbklassen. Größere Werte "
-                "entfernen kleine isolierte Punkte, können aber Details verlieren.",
+                "Glättet die fertig zugeordneten Farbklassen mit einem "
+                "Mehrheitsfilter. Ohne Glättung bleiben alle klassifizierten "
+                "Pixel unverändert; größere Filter entfernen kleine isolierte "
+                "Punkte, können aber Details verlieren.",
             )
             ui.select(
-                [1, 3, 5, 7],
+                {
+                    1: "Keine Glättung",
+                    3: "3 × 3 Pixel",
+                    5: "5 × 5 Pixel",
+                    7: "7 × 7 Pixel",
+                },
                 value=self.project.settings.class_smooth_size,
                 on_change=lambda event: self._change_setting(
                     "class_smooth_size", event.value, int
@@ -341,7 +378,7 @@ class MainView:
         self._sync_paper_controls()
 
         ui.label(
-            "CMYK direkt eingeben oder eine Farbe aus color_library.json wählen."
+            "Die Reihenfolge der Druckfarben kann per Drag & Drop geändert werden."
         ).classes("text-xs text-grey-7")
 
         with ui.column().classes("w-full gap-3") as ink_cards:
@@ -367,24 +404,26 @@ class MainView:
 
     def _build_ink_controls(self, ink: Ink) -> None:
         card = ui.expansion().props("dense expand-separator").classes(
-            "warm-control w-full rounded-lg"
+            "warm-control ink-card w-full min-w-0 rounded-lg"
         )
         with (
             card.add_slot("header"),
-            ui.row().classes("w-full items-center gap-2 no-wrap"),
+            ui.row().classes("ink-card-header items-center gap-2 no-wrap"),
         ):
                 ui.icon("drag_indicator").classes(
                     "ink-drag-handle text-grey-6 shrink-0"
                 )
                 number = ui.label().classes("font-semibold w-5 shrink-0")
                 summary_swatch = ui.element("div").classes("shrink-0")
-                summary = ui.label().classes("text-sm grow truncate")
+                summary = ui.label().classes("ink-card-summary text-sm grow")
                 opacity_label = ui.label().classes("text-sm font-medium shrink-0")
                 ui.button(
                     icon="delete_outline",
                     color="negative",
                     on_click=lambda ink=ink: self._delete_ink(ink),
-                ).props("flat dense round size=sm").tooltip("Druckfarbe löschen")
+                ).props("flat dense round size=sm").classes("shrink-0").tooltip(
+                    "Druckfarbe löschen"
+                )
 
         with card:
             source_select = ui.toggle(
@@ -399,13 +438,6 @@ class MainView:
             ).props("spread no-caps").classes("w-full")
 
             with ui.column().classes("w-full gap-2 px-2") as cmyk_group:
-                name_input = ui.input(
-                    "Bezeichnung",
-                    value=ink.name,
-                    on_change=lambda event, ink=ink: self._change_ink_name(
-                        ink, event.value
-                    ),
-                ).classes("w-full")
                 with ui.row().classes("w-full gap-2"):
                     cmyk_inputs = []
                     for index, label in enumerate(("C %", "M %", "Y %", "K %")):
@@ -420,17 +452,47 @@ class MainView:
                             ),
                         ).classes("grow min-w-[65px]")
                         cmyk_inputs.append(field)
+                color_picker = ui.color_input(
+                    "Farbwähler (Vorschau → CMYK)",
+                    value=_rgb_to_hex(ink.rgb_preview),
+                    preview=True,
+                    on_change=lambda event, ink=ink: self._change_ink_color_picker(
+                        ink, event.value
+                    ),
+                ).classes("w-full")
 
             with ui.column().classes("w-full gap-1 px-2") as library_group:
                 palette_select = ui.select(
                     self._library_options(),
-                    label="Pantone / gespeicherte Farbe",
+                    label="Pantone-Farbe",
                     value=ink.library_id or None,
                     with_input=True,
                     on_change=lambda event, ink=ink: self._change_library_color(
                         ink, event.value
                     ),
                 ).classes("w-full")
+                option_colors = [
+                    _rgb_to_hex(entry.rgb)
+                    for entry in self.color_library.entries
+                    if entry.system != "paper"
+                ]
+                palette_select.add_slot(
+                    "option",
+                    f"""
+                    <q-item v-bind="props.itemProps">
+                      <q-item-section avatar>
+                        <div :style="{{
+                          width: '28px', height: '20px', borderRadius: '4px',
+                          border: '1px solid rgba(0,0,0,.25)',
+                          backgroundColor: {option_colors!r}[props.opt.value]
+                        }}" />
+                      </q-item-section>
+                      <q-item-section>
+                        <q-item-label>{{{{ props.opt.label }}}}</q-item-label>
+                      </q-item-section>
+                    </q-item>
+                    """,
+                )
 
             swatch = ui.element("div").style(
                 self._swatch_style(ink.rgb_preview)
@@ -446,8 +508,8 @@ class MainView:
                 "swatch": swatch,
                 "cmyk_group": cmyk_group,
                 "library_group": library_group,
-                "name": name_input,
                 "cmyk_inputs": cmyk_inputs,
+                "color_picker": color_picker,
                 "palette": palette_select,
             }
             self._sync_ink_control_visibility(ink)
@@ -488,7 +550,7 @@ class MainView:
 
     def _build_overprint_controls(self) -> None:
         ui.separator()
-        ui.label("Überdruckfarben").classes("text-lg font-semibold uppercase")
+        ui.label("Überdruckfarben").classes("text-lg font-semibold")
         self._ensure_measured_overprints()
         palette = self._automatic_palette()
         for plate_count in range(2, len(self.project.inks) + 1):
@@ -1003,8 +1065,12 @@ class MainView:
 
     def _sync_ink_control_visibility(self, ink: Ink) -> None:
         controls = self._ink_controls[id(ink)]
-        controls["cmyk_group"].set_visibility(ink.color_source == "cmyk")
-        controls["library_group"].set_visibility(ink.color_source == "library")
+        show_cmyk = ink.color_source == "cmyk"
+        controls["cmyk_group"].set_visibility(show_cmyk)
+        controls["library_group"].set_visibility(not show_cmyk)
+        controls["palette"].set_visibility(not show_cmyk)
+        if show_cmyk:
+            controls["palette"].run_method("hidePopup")
 
     def _update_ink_summary(self, ink: Ink) -> None:
         controls = self._ink_controls[id(ink)]
@@ -1026,11 +1092,12 @@ class MainView:
         )
 
     def _change_ink_source(self, ink: Ink, value: str | None) -> None:
+        if self._syncing_ink_controls:
+            return
         if value not in {"cmyk", "library"}:
             return
         ink.color_source = value
         if value == "cmyk":
-            ink.library_id = ""
             ink.pantone = ""
             ink.rgb_preview, ink.lab = color_from_cmyk(ink.cmyk)
             self._update_ink_swatch(ink)
@@ -1047,6 +1114,8 @@ class MainView:
         index: int,
         value: float | None,
     ) -> None:
+        if self._syncing_ink_controls:
+            return
         if value is None:
             return
         components = list(ink.cmyk)
@@ -1054,8 +1123,42 @@ class MainView:
         ink.cmyk = tuple(components)
         ink.rgb_preview, ink.lab = color_from_cmyk(ink.cmyk)
         ink.color_source = "cmyk"
-        ink.library_id = ""
         ink.pantone = ""
+        self._update_ink_swatch(ink)
+        controls = self._ink_controls[id(ink)]
+        self._syncing_ink_controls = True
+        try:
+            controls["color_picker"].set_value(_rgb_to_hex(ink.rgb_preview))
+        finally:
+            self._syncing_ink_controls = False
+        self._update_ink_summary(ink)
+        self._sync_automatic_mixture_controls()
+        self.schedule_preview()
+
+    def _change_ink_color_picker(self, ink: Ink, value: str | None) -> None:
+        if self._syncing_ink_controls:
+            return
+        if not value or len(value) != 7 or not value.startswith("#"):
+            return
+        try:
+            rgb = tuple(int(value[index : index + 2], 16) for index in (1, 3, 5))
+        except ValueError:
+            return
+        ink.cmyk = rgb_to_cmyk(rgb)
+        ink.rgb_preview, ink.lab = color_from_cmyk(ink.cmyk)
+        ink.color_source = "cmyk"
+        ink.pantone = ""
+        controls = self._ink_controls[id(ink)]
+        self._syncing_ink_controls = True
+        try:
+            for field, component in zip(
+                controls["cmyk_inputs"],
+                ink.cmyk,
+                strict=True,
+            ):
+                field.set_value(component)
+        finally:
+            self._syncing_ink_controls = False
         self._update_ink_swatch(ink)
         self._update_ink_summary(ink)
         self._sync_automatic_mixture_controls()
@@ -1083,16 +1186,20 @@ class MainView:
             ink.cmyk = entry.cmyk
 
         controls = self._ink_controls[id(ink)]
-        controls["name"].set_value(ink.name)
-        controls["source"].set_value("library")
-        controls["palette"].set_value(entry.id)
-        if entry.cmyk is not None:
-            for field, component in zip(
-                controls["cmyk_inputs"],
-                entry.cmyk,
-                strict=True,
-            ):
-                field.set_value(component)
+        self._syncing_ink_controls = True
+        try:
+            controls["source"].set_value("library")
+            controls["palette"].set_value(entry.id)
+            controls["color_picker"].set_value(_rgb_to_hex(entry.rgb))
+            if entry.cmyk is not None:
+                for field, component in zip(
+                    controls["cmyk_inputs"],
+                    entry.cmyk,
+                    strict=True,
+                ):
+                    field.set_value(component)
+        finally:
+            self._syncing_ink_controls = False
         self._update_ink_swatch(ink)
         self._update_ink_summary(ink)
         self._sync_ink_control_visibility(ink)
@@ -1567,7 +1674,7 @@ class MainView:
         try:
             archive = await run.io_bound(
                 export_project,
-                self.project.image.copy(),
+                self.project.image,
                 deepcopy(self.project.settings),
                 deepcopy(self.project.inks),
                 deepcopy(self._active_measured_overprints()),

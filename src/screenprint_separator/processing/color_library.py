@@ -34,6 +34,26 @@ def cmyk_to_rgb(cmyk: tuple[float, float, float, float]) -> tuple[int, int, int]
     return tuple(int(value) for value in np.rint(rgb))
 
 
+def rgb_to_cmyk(rgb: tuple[int, int, int]) -> tuple[float, float, float, float]:
+    """Convert an sRGB picker value to generic device CMYK percentages."""
+    red, green, blue = np.clip(
+        np.asarray(rgb, dtype=np.float32) / 255.0,
+        0.0,
+        1.0,
+    )
+    black = 1.0 - max(red, green, blue)
+    if black >= 1.0 - 1e-7:
+        return (0.0, 0.0, 0.0, 100.0)
+    denominator = 1.0 - black
+    cyan = (1.0 - red - black) / denominator
+    magenta = (1.0 - green - black) / denominator
+    yellow = (1.0 - blue - black) / denominator
+    return tuple(
+        round(float(value * 100.0), 1)
+        for value in (cyan, magenta, yellow, black)
+    )
+
+
 def rgb_to_lab_tuple(rgb: tuple[int, int, int]) -> tuple[float, float, float]:
     lab = ColorConverter.rgb_to_lab(np.asarray(rgb, dtype=np.uint8))
     return tuple(float(value) for value in lab)
