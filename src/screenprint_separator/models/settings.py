@@ -8,7 +8,6 @@ class Settings:
     dpi: int = 300
     output_dpi: int = 600
     resize_mode: str = "fit"
-    upscale_algorithm: str = "nearest"
     preview_max_size: int = 1200
     preview_width: int = 1200
     preview_height: int = 1200
@@ -18,7 +17,7 @@ class Settings:
     texture_blur_radius: float = 2.0
     class_smooth_size: int = 3
     threshold: int = 128
-    trapping_px: int = 0
+    trapping_mm: float = 0.0
     brightness: float = 1.0
     contrast: float = 1.0
 

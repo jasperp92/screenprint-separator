@@ -41,17 +41,9 @@ def _output_size(settings: Settings) -> tuple[int, int]:
     )
 
 
-def _upscale_resampling(settings: Settings) -> Image.Resampling:
-    algorithms = {
-        "nearest": Image.Resampling.NEAREST,
-        "bilinear": Image.Resampling.BILINEAR,
-        "bicubic": Image.Resampling.BICUBIC,
-        "lanczos": Image.Resampling.LANCZOS,
-    }
-    try:
-        return algorithms[settings.upscale_algorithm]
-    except KeyError as error:
-        raise ValueError("Unbekannter Upscaling-Algorithmus.") from error
+def _trapping_pixels(settings: Settings) -> int:
+    """Convert the physical trap width to pixels at final plate resolution."""
+    return max(0, round(settings.trapping_mm / 25.4 * settings.output_dpi))
 
 
 def _resize_for_print(image: Image.Image, settings: Settings) -> Image.Image:
@@ -150,6 +142,7 @@ def export_project(
             simulation.close()
 
         output_size = _output_size(settings)
+        trapping_pixels = _trapping_pixels(settings)
         plate_paths = []
         for channel, ink in enumerate(inks):
             # Index only one channel at a time.  Indexing all masks at once creates
@@ -162,25 +155,25 @@ def export_project(
             active_image = Image.fromarray(active, mode="L")
             del active
 
-            if settings.trapping_px > 0:
-                trapped = active_image.filter(
-                    ImageFilter.MaxFilter(size=settings.trapping_px * 2 + 1)
-                )
-                active_image.close()
-                active_image = trapped
-
-            inverted = ImageOps.invert(active_image)
-            active_image.close()
-            resized_plate = inverted.resize(
+            resized_plate = active_image.resize(
                 output_size,
-                resample=_upscale_resampling(settings),
+                resample=Image.Resampling.NEAREST,
             )
-            inverted.close()
-            plate = resized_plate.point(
+            active_image.close()
+            if trapping_pixels > 0:
+                trapped = resized_plate.filter(
+                    ImageFilter.MaxFilter(size=trapping_pixels * 2 + 1)
+                )
+                resized_plate.close()
+                resized_plate = trapped
+
+            inverted = ImageOps.invert(resized_plate)
+            resized_plate.close()
+            plate = inverted.point(
                 lambda value: 255 if value >= settings.threshold else 0,
                 mode="1",
             )
-            resized_plate.close()
+            inverted.close()
             try:
                 plate_path = (
                     export_dir / f"platte_{channel + 1}_{_safe_name(ink.name)}.tif"

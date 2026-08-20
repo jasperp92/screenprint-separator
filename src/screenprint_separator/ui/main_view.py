@@ -813,8 +813,9 @@ class MainView:
                     self._build_info_label(
                         "Ausgabe-DPI",
                         "Pixelauflösung der finalen 1-Bit-TIFF-Druckplatten. Von der "
-                        "Arbeitsauflösung wird mit dem gewählten Algorithmus auf diese "
-                        "Größe skaliert.",
+                        "Arbeitsauflösung wird pixelgenau auf diese Größe skaliert. "
+                        "Eine höhere Ausgabe-DPI erzeugt keine zusätzlichen Details, "
+                        "sondern ein feineres Ausgaberaster für Belichter und RIP.",
                     )
                     ui.number(
                         value=self.project.settings.output_dpi,
@@ -831,26 +832,28 @@ class MainView:
                     "resize_mode", event.value, str
                 ),
             ).classes("w-full")
+        with ui.expansion("Trapping", icon="compare_arrows").classes(
+            "export-settings w-full text-white"
+        ):
             self._build_info_label(
-                "Upscaling-Algorithmus",
-                "Bestimmt, wie die separierten Platten von Arbeits-DPI auf "
-                "Ausgabe-DPI vergrößert werden. Nearest Neighbour erhält harte "
-                "Pixelkanten; Lanczos, bikubisch und bilinear interpolieren.",
+                "Überfüllung der Druckplatten",
+                "Verbreitert jede Druckplatte in der finalen Ausgabeauflösung um "
+                "das gewählte physische Maß. So überlappen benachbarte Farben leicht "
+                "und kleine Passerungenauigkeiten erzeugen keine weißen Blitzer. "
+                "0 mm deaktiviert das Trapping.",
             )
-            ui.select(
-                {
-                    "nearest": "Pixelgenau (Nearest Neighbour)",
-                    "bilinear": "Bilinear",
-                    "bicubic": "Bikubisch",
-                    "lanczos": "Lanczos",
-                },
-                value=self.project.settings.upscale_algorithm,
+            ui.number(
+                value=self.project.settings.trapping_mm,
+                min=0,
+                max=2,
+                step=0.05,
                 on_change=lambda event: self._change_export_setting(
-                    "upscale_algorithm", event.value, str
+                    "trapping_mm", event.value, float
                 ),
-            ).props('aria-label="Upscaling-Algorithmus"').classes("w-full")
-            self.export_size_label = ui.label().classes("text-sm text-white")
-            self._update_export_size_label()
+            ).props('aria-label="Trapping" suffix="mm"').classes("w-full")
+
+        self.export_size_label = ui.label().classes("text-sm text-white")
+        self._update_export_size_label()
 
         self.export_button = ui.button(
             "Simulation und Platten exportieren",
@@ -891,9 +894,11 @@ class MainView:
         work_height = round(settings.print_height_cm / 2.54 * settings.dpi)
         output_width = round(settings.print_width_cm / 2.54 * settings.output_dpi)
         output_height = round(settings.print_height_cm / 2.54 * settings.output_dpi)
+        trapping_pixels = round(settings.trapping_mm / 25.4 * settings.output_dpi)
         self.export_size_label.set_text(
             f"Separation: {work_width} × {work_height} px · "
-            f"Ausgabe: {output_width} × {output_height} px"
+            f"Ausgabe: {output_width} × {output_height} px · "
+            f"Trapping: {trapping_pixels} px"
         )
 
     def _change_input_tone(self, name: str, value: float | None) -> None:
