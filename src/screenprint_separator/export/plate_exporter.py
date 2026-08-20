@@ -113,6 +113,87 @@ def _close_memmap(array: np.memmap) -> None:
         mapping.close()
 
 
+def _render_plate(
+    active_image: Image.Image,
+    output_size: tuple[int, int],
+    settings: Settings,
+) -> Image.Image:
+    """Render a smooth 1-bit plate in bounded-memory output tiles."""
+    output_width, output_height = output_size
+    source_width, source_height = active_image.size
+    plate = Image.new("1", output_size, color=1)
+    trapping_pixels = _trapping_pixels(settings)
+    # Include neighboring output pixels so LANCZOS resampling and the rounded
+    # trapping blur do not create visible seams at tile boundaries.
+    resize_scale = max(
+        output_width / source_width,
+        output_height / source_height,
+        1.0,
+    )
+    resample_padding = int(np.ceil(3.0 * resize_scale))
+    trapping_padding = int(np.ceil(trapping_pixels * 1.5))
+    padding = trapping_padding + resample_padding
+    tile_size = max(512, settings.tile_size * 2)
+
+    for y0 in range(0, output_height, tile_size):
+        y1 = min(y0 + tile_size, output_height)
+        for x0 in range(0, output_width, tile_size):
+            x1 = min(x0 + tile_size, output_width)
+            outer_x0 = max(0, x0 - padding)
+            outer_y0 = max(0, y0 - padding)
+            outer_x1 = min(output_width, x1 + padding)
+            outer_y1 = min(output_height, y1 + padding)
+            outer_size = (outer_x1 - outer_x0, outer_y1 - outer_y0)
+            source_box = (
+                outer_x0 * source_width / output_width,
+                outer_y0 * source_height / output_height,
+                outer_x1 * source_width / output_width,
+                outer_y1 * source_height / output_height,
+            )
+            resized = active_image.resize(
+                outer_size,
+                resample=Image.Resampling.LANCZOS,
+                box=source_box,
+            )
+            threshold = settings.threshold
+            if trapping_pixels > 0:
+                # A square MaxFilter turns every isolated classified pixel into
+                # a conspicuous block. Remove sub-print-sized specks first and
+                # use a radial blur with a low cutoff for rounded expansion.
+                cleaned = resized.filter(ImageFilter.MedianFilter(size=3))
+                resized.close()
+                trapped = cleaned.filter(
+                    ImageFilter.GaussianBlur(
+                        radius=max(0.5, trapping_pixels / 2.0)
+                    )
+                )
+                cleaned.close()
+                resized = trapped
+                # With sigma=radius/2, a cutoff around 6/255 expands a solid
+                # edge by approximately the requested radius.
+                threshold = max(threshold, 249)
+            inverted = ImageOps.invert(resized)
+            resized.close()
+            bilevel = inverted.point(
+                lambda value, threshold=threshold: (
+                    255 if value >= threshold else 0
+                ),
+                mode="1",
+            )
+            inverted.close()
+            inner_box = (
+                x0 - outer_x0,
+                y0 - outer_y0,
+                x1 - outer_x0,
+                y1 - outer_y0,
+            )
+            inner = bilevel.crop(inner_box)
+            bilevel.close()
+            plate.paste(inner, (x0, y0))
+            inner.close()
+    return plate
+
+
 def export_project(
     image: Image.Image,
     settings: Settings,
@@ -147,7 +228,6 @@ def export_project(
             simulation.close()
 
         output_size = _output_size(settings)
-        trapping_pixels = _trapping_pixels(settings)
         plate_paths = []
         for channel, ink in enumerate(inks):
             # Index only one channel at a time.  Indexing all masks at once creates
@@ -160,28 +240,13 @@ def export_project(
             active_image = Image.fromarray(active, mode="L")
             del active
 
-            resized_plate = active_image.resize(
-                output_size,
-                resample=Image.Resampling.NEAREST,
-            )
-            active_image.close()
-            if trapping_pixels > 0:
-                trapped = resized_plate.filter(
-                    ImageFilter.MaxFilter(size=trapping_pixels * 2 + 1)
-                )
-                resized_plate.close()
-                resized_plate = trapped
-
-            inverted = ImageOps.invert(resized_plate)
-            resized_plate.close()
-            plate = inverted.point(
-                lambda value: 255 if value >= settings.threshold else 0,
-                mode="1",
-            )
-            inverted.close()
             try:
-                plate_path = (
-                    export_dir / f"platte_{channel + 1}_{_safe_name(ink.name)}.tif"
+                plate = _render_plate(active_image, output_size, settings)
+            finally:
+                active_image.close()
+            try:
+                plate_path = export_dir / (
+                    f"farbauszug_{channel + 1}_{_safe_name(ink.name)}.tif"
                 )
                 plate.save(
                     plate_path,

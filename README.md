@@ -1,7 +1,11 @@
 # Screenprint Separator
 
-Mit dem Siebdruck-Separator lassen sich Negative beziehungsweise
-Siebdruckplatten digital vorbereiten. Das Programm berechnet und simuliert das Überdrucken der Farben. Es können eine bis fünf verschiedene Druckfarben ausgewählt und bis zu 32 Überdruckzustände simuliert werden.
+Mit dem Siebdruck-Separator lassen sich digitale Farbauszüge für
+Belichtungsfilme (Filmpositive) vorbereiten. Das Programm berechnet und
+simuliert das Überdrucken der Farben. Es können eine bis fünf verschiedene
+Druckfarben ausgewählt und bis zu 32 Überdruckzustände simuliert werden. Die
+exportierten Farbauszüge dienen als Vorlagen für die Belichtungsfilme, mit denen
+die einzelnen Siebe belichtet werden.
 
 Dies ist ein Vibecoding-Projekt von mir, das ich überwiegend mit ChatGPT Codex
 (GPT-5.6 Sol, Reasoning-Stufe „High“) entwickelt habe.
@@ -196,7 +200,8 @@ LAB und RGB, werden beide näherungsweise aus CMYK berechnet. Nach Änderungen a
 der JSON-Datei kann sie über „Farbbibliothek neu laden“ aktualisiert werden.
 
 Papierfarben verwenden `"system": "paper"` und erscheinen ausschließlich in
-der Papierauswahl. Sie zählen nicht als Druckfarbe und erzeugen keine Platte:
+der Papierauswahl. Sie zählen nicht als Druckfarbe und erzeugen keinen
+Farbauszug:
 
 ```json
 {
@@ -235,10 +240,10 @@ Ziehen innerhalb des Rahmens verschiebt ihn, Ziehen an einer Kante verändert
 diese Seite und Ziehen an einer Ecke skaliert ihn in beide Richtungen. Bei
 „Format füllen“ bleibt dabei das Seitenverhältnis des Druckformats gesperrt. Im
 Modus „Freier Rahmen“ darf es sich ändern und bestimmt dann automatisch das
-Seitenverhältnis des Druckformats und der exportierten Platten. Der Ausschnitt
-wird zusammen mit der Sitzung gespeichert. Rahmenlinien, Raster und Griffe
-werden nur während der aktiven Bearbeitung eingeblendet; die abgedunkelte
-Beschnittmaske bleibt zur Exportkontrolle sichtbar.
+Seitenverhältnis des Druckformats und der exportierten Farbauszüge. Der
+Ausschnitt wird zusammen mit der Sitzung gespeichert. Rahmenlinien, Raster und
+Griffe werden nur während der aktiven Bearbeitung eingeblendet; die
+abgedunkelte Beschnittmaske bleibt zur Exportkontrolle sichtbar.
 
 Beim Auswählen von „Format füllen“ sowie nach Änderungen an Druckformat oder DPI
 wird zunächst wieder der größtmögliche Ausschnitt im festen Seitenverhältnis
@@ -247,11 +252,12 @@ verwendet. Danach kann der Rahmen erneut verschoben oder verkleinert werden.
 Der ZIP-Export enthält:
 
 - die Simulation als PNG,
-- eine bis fünf binäre, Group-4-komprimierte 1-Bit-TIFF-Platten,
+- eine bis fünf binäre, Group-4-komprimierte 1-Bit-TIFF-Farbauszüge,
 - `projekt.json` mit Druckreihenfolge, LAB-Palette und Einstellungen.
 
-Die TIFF-Platten selbst sind absichtlich Schwarz-Weiß-Bitmaps. LAB-Werte werden
-für Klassifikation und Simulation verwendet und im Projektmanifest gespeichert.
+Die TIFF-Farbauszüge selbst sind absichtlich Schwarz-Weiß-Bitmaps. LAB-Werte
+werden für Klassifikation und Simulation verwendet und im Projektmanifest
+gespeichert.
 
 ## Sitzungswiederherstellung
 

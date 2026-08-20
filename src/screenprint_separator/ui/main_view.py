@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 from nicegui import events, run, ui
+from nicegui.elements.image import pil_to_tempfile
 from PIL import Image, ImageOps
 
 from screenprint_separator.export.plate_exporter import export_project
@@ -21,6 +22,7 @@ from screenprint_separator.processing.color_library import (
 from screenprint_separator.processing.framing import (
     constrain_crop_box_to_aspect,
     crop_aspect_ratio,
+    crop_box_pixels,
     fit_crop_box,
     move_crop_box,
     normalize_crop_box,
@@ -28,6 +30,7 @@ from screenprint_separator.processing.framing import (
 )
 from screenprint_separator.processing.image_loader import ImageLoader
 from screenprint_separator.processing.palette import (
+    OverprintPalette,
     build_overprint_palette,
     mixed_state_indices,
 )
@@ -36,10 +39,16 @@ from screenprint_separator.processing.pipeline import (
     adjust_input_image,
     process_image,
 )
+from screenprint_separator.processing.simulation import Simulation
 
 
 def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{value:02x}" for value in rgb)
+
+
+def _set_pil_source(element: object, image: Image.Image) -> None:
+    """Give NiceGUI a temporary path instead of retaining a PIL object."""
+    element.set_source(pil_to_tempfile(image, "PNG"))
 
 
 def _ink_from_cmyk(
@@ -126,6 +135,8 @@ class MainView:
         self._crop_drag_action: str | None = None
         self._crop_cursor_class: str | None = None
         self._crop_active = False
+        self._base_preview_simulation: Image.Image | None = None
+        self._preview_palette: OverprintPalette | None = None
 
         ui.add_css(
             """
@@ -139,6 +150,24 @@ class MainView:
             .preview-image.crop-cursor-ns > img { cursor: ns-resize; }
             .preview-image.crop-cursor-nwse > img { cursor: nwse-resize; }
             .preview-image.crop-cursor-nesw > img { cursor: nesw-resize; }
+            .plate-preview-row {
+                display: flex !important;
+                flex-wrap: nowrap !important;
+                align-items: flex-start;
+                width: 100%;
+            }
+            .plate-preview-item {
+                flex: 1 1 0 !important;
+                width: 0;
+                min-width: 0 !important;
+            }
+            .plate-preview-item .q-img { width: 100% !important; }
+            .plate-preview-label {
+                max-width: 100%;
+                overflow: hidden;
+                white-space: nowrap;
+                text-overflow: ellipsis;
+            }
             .preview-image.crop-active { touch-action: none; user-select: none; }
             .input-uploader .q-uploader__list { display: none; }
             .warm-control {
@@ -580,7 +609,7 @@ class MainView:
                 for state in mixed_state_indices(len(self.project.inks))
                 if int(palette.masks[state].sum()) == plate_count
             )
-            ui.label(f"{plate_count} Platten").classes(
+            ui.label(f"{plate_count} Druckfarben").classes(
                 "text-xs font-medium text-grey-7 mt-1"
             )
             for state in states:
@@ -779,8 +808,10 @@ class MainView:
 
         self.palette_row = ui.row().classes("w-full gap-2 flex-wrap")
 
-        with ui.expansion("Plattenvorschau", icon="layers").classes("w-full"):
-            self.plate_preview_row = ui.row().classes("w-full gap-3 flex-wrap")
+        with ui.expansion("Farbauszüge", icon="layers").classes("w-full"):
+            self.plate_preview_row = ui.row().classes(
+                "plate-preview-row w-full gap-3 flex-nowrap"
+            )
             self._rebuild_plate_previews()
 
         self._build_export_settings()
@@ -790,9 +821,11 @@ class MainView:
         self.plate_preview_row.clear()
         with self.plate_preview_row:
             for index, ink in enumerate(self.project.inks, start=1):
-                with ui.column().classes("grow min-w-[150px]"):
-                    ui.label(f"{index} · {ink.name}").classes("font-medium")
-                    plate = ui.image("").classes("w-full rounded")
+                with ui.column().classes("plate-preview-item"):
+                    ui.label(f"{index} · {ink.name}").classes(
+                        "plate-preview-label font-medium"
+                    )
+                    plate = ui.image("").classes("plate-preview-image w-full rounded")
                     plate.set_visibility(False)
                     self._plate_previews.append((ink, plate))
 
@@ -810,7 +843,7 @@ class MainView:
                     on_change=lambda event: self._change_print_dimension(
                         "width", event.value
                     ),
-                ).classes("grow")
+                ).props("debounce=400").classes("grow")
                 self.print_height_input = ui.number(
                     "Höhe (cm)",
                     value=self.project.settings.print_height_cm,
@@ -818,7 +851,7 @@ class MainView:
                     on_change=lambda event: self._change_print_dimension(
                         "height", event.value
                     ),
-                ).classes("grow")
+                ).props("debounce=400").classes("grow")
             with ui.row().classes("w-full"):
                 with ui.column().classes("grow gap-0"):
                     self._build_info_label(
@@ -827,28 +860,33 @@ class MainView:
                         "und klassifiziert wird. Mehr DPI liefern feinere Details, "
                         "benötigen aber deutlich mehr Zeit und Speicher.",
                     )
-                    ui.number(
+                    self.work_dpi_input = ui.number(
                         value=self.project.settings.dpi,
                         min=72,
                         on_change=lambda event: self._change_export_setting(
                             "dpi", event.value, int
                         ),
-                    ).props('aria-label="Arbeits-DPI"').classes("w-full")
+                    ).props(
+                        'aria-label="Arbeits-DPI" debounce=400'
+                    ).classes("w-full")
                 with ui.column().classes("grow gap-0"):
                     self._build_info_label(
                         "Ausgabe-DPI",
-                        "Pixelauflösung der finalen 1-Bit-TIFF-Druckplatten. Von der "
-                        "Arbeitsauflösung wird pixelgenau auf diese Größe skaliert. "
-                        "Eine höhere Ausgabe-DPI erzeugt keine zusätzlichen Details, "
-                        "sondern ein feineres Ausgaberaster für Belichter und RIP.",
+                        "Pixelauflösung der finalen 1-Bit-TIFF-Farbauszüge. Die exakt "
+                        "klassifizierten Masken werden kachelweise und kantengeglättet "
+                        "auf diese Größe skaliert. Eine höhere Ausgabe-DPI erzeugt "
+                        "keine neuen Bilddetails, aber feinere Konturen für Belichter "
+                        "und RIP.",
                     )
-                    ui.number(
+                    self.output_dpi_input = ui.number(
                         value=self.project.settings.output_dpi,
                         min=72,
                         on_change=lambda event: self._change_export_setting(
                             "output_dpi", event.value, int
                         ),
-                    ).props('aria-label="Ausgabe-DPI"').classes("w-full")
+                    ).props(
+                        'aria-label="Ausgabe-DPI" debounce=400'
+                    ).classes("w-full")
             with ui.row().classes("w-full items-center gap-2"):
                 self.preview_mode_select = ui.select(
                     {
@@ -872,27 +910,29 @@ class MainView:
             "export-settings w-full text-white"
         ):
             self._build_info_label(
-                "Überfüllung der Druckplatten",
-                "Verbreitert jede Druckplatte in der finalen Ausgabeauflösung um "
+                "Überfüllung der Farbauszüge",
+                "Verbreitert jeden Farbauszug in der finalen Ausgabeauflösung um "
                 "das gewählte physische Maß. So überlappen benachbarte Farben leicht "
                 "und kleine Passerungenauigkeiten erzeugen keine weißen Blitzer. "
-                "0 mm deaktiviert das Trapping.",
+                "0 mm deaktiviert das Trapping. Meist reichen 0,05 bis 0,3 mm; "
+                "hohe Werte können Zwischenräume schließen und Details verbinden. "
+                "Die Auswirkung wird direkt in der Simulationsvorschau angenähert.",
             )
-            ui.number(
-                value=self.project.settings.trapping_mm,
-                min=0,
-                max=2,
-                step=0.05,
+            self.trapping_input = ui.input(
+                value=str(self.project.settings.trapping_mm),
                 on_change=lambda event: self._change_export_setting(
                     "trapping_mm", event.value, float
                 ),
-            ).props('aria-label="Trapping" suffix="mm"').classes("w-full")
+            ).props(
+                'type=number inputmode=decimal min=0 max=2 step=0.05 '
+                'aria-label="Trapping" suffix="mm" debounce=300'
+            ).classes("w-full")
 
         self.export_size_label = ui.label().classes("text-sm text-white")
         self._update_export_size_label()
 
         self.export_button = ui.button(
-            "Simulation und Platten exportieren",
+            "Simulation und Farbauszüge exportieren",
             icon="download",
             on_click=self.export,
         ).classes("w-full")
@@ -920,15 +960,49 @@ class MainView:
     ) -> None:
         if value is None:
             return
-        setattr(self.project.settings, name, converter(value))
+        normalized = str(value).strip().replace(",", ".")
+        if normalized in {"", ".", "+", "-", "+.", "-."}:
+            return
+        try:
+            numeric_value = float(normalized)
+            converted = int(numeric_value) if converter is int else converter(
+                numeric_value
+            )
+        except (TypeError, ValueError):
+            return
+        if name in {"dpi", "output_dpi"}:
+            entered_dpi = int(converted)
+            converted = max(72, entered_dpi)
+            if converted != entered_dpi:
+                dpi_input = (
+                    self.work_dpi_input
+                    if name == "dpi"
+                    else self.output_dpi_input
+                )
+                dpi_input.set_value(converted)
+        elif name == "trapping_mm":
+            entered_trapping = float(converted)
+            converted = min(2.0, max(0.0, entered_trapping))
+            if converted != entered_trapping:
+                self.trapping_input.set_value(str(converted))
+        setattr(self.project.settings, name, converted)
+        preview_changed = name == "trapping_mm"
         if (
             name in {"dpi", "output_dpi"}
             and self.project.settings.resize_mode == "fit"
         ):
             self._maximize_fit_crop()
             self._crop_active = False
-            self._update_preview_display()
+            preview_changed = True
+        if preview_changed:
+            self._refresh_trapping_simulation()
+            self._update_preview_display(force_source=True)
         self._update_export_size_label()
+        if (
+            name in {"dpi", "output_dpi"}
+            and self.project.settings.resize_mode != "fit"
+        ):
+            self._refresh_plate_previews()
         self._save_session()
 
     def _change_resize_mode(self, event: events.ValueChangeEventArguments) -> None:
@@ -945,6 +1019,7 @@ class MainView:
             self._maximize_fit_crop()
         self.crop_reset_button.set_visibility(event.value != "pad")
         self._update_export_size_label()
+        self._refresh_trapping_simulation()
         self._update_preview_display(force_source=True)
         self._save_session()
 
@@ -967,7 +1042,8 @@ class MainView:
             self._maximize_fit_crop()
             self._crop_active = False
         self._update_export_size_label()
-        self._update_preview_display()
+        self._refresh_trapping_simulation()
+        self._update_preview_display(force_source=True)
         self._save_session()
 
     def _sync_print_size_to_crop(self, anchor: str = "width") -> None:
@@ -1014,7 +1090,8 @@ class MainView:
             self._sync_print_size_to_crop("width")
         self._crop_active = False
         self._update_export_size_label()
-        self._update_preview_display()
+        self._refresh_trapping_simulation()
+        self._update_preview_display(force_source=True)
         self._save_session()
 
     def _constrain_crop_to_print_aspect(self) -> None:
@@ -1191,7 +1268,8 @@ class MainView:
         if self.project.settings.resize_mode == "free":
             self._sync_print_size_to_crop("width")
         self._update_export_size_label()
-        self._update_preview_size_label()
+        self._refresh_trapping_simulation()
+        self._update_preview_display(force_source=True)
         self._save_session()
 
     def _update_export_size_label(self) -> None:
@@ -1200,10 +1278,19 @@ class MainView:
         output_width = round(settings.print_width_cm / 2.54 * settings.output_dpi)
         output_height = round(settings.print_height_cm / 2.54 * settings.output_dpi)
         trapping_pixels = round(settings.trapping_mm / 25.4 * settings.output_dpi)
+        scale_factor = settings.output_dpi / settings.dpi
+        scale_text = f"{scale_factor:.1f}".replace(".", ",")
+        warnings = []
+        if scale_factor > 2.0:
+            warnings.append("starke Hochskalierung")
+        if settings.trapping_mm > 0.5:
+            warnings.append("Trapping sehr hoch")
+        warning_text = f" · ⚠ {' / '.join(warnings)}" if warnings else ""
         self.export_size_label.set_text(
-            f"Separation: {work_width} × {work_height} px · "
-            f"Ausgabe: {output_width} × {output_height} px · "
-            f"Trapping: {trapping_pixels} px"
+            f"Berechnung ({settings.dpi} DPI): {work_width} × {work_height} px · "
+            f"TIFF ({settings.output_dpi} DPI): {output_width} × {output_height} px · "
+            f"Skalierung: {scale_text}× · Trapping: {trapping_pixels} px"
+            f"{warning_text}"
         )
 
     def _export_work_size(self) -> tuple[int, int]:
@@ -1251,9 +1338,15 @@ class MainView:
         if self.project.image is None:
             return
         preview = self.project.image.copy()
-        preview.thumbnail((800, 800), Image.Resampling.LANCZOS)
-        preview = adjust_input_image(preview, self.project.settings)
-        self.input_preview.set_source(preview)
+        try:
+            preview.thumbnail((800, 800), Image.Resampling.LANCZOS)
+            adjusted = adjust_input_image(preview, self.project.settings)
+            try:
+                _set_pil_source(self.input_preview, adjusted)
+            finally:
+                adjusted.close()
+        finally:
+            preview.close()
 
     def _change_paper_selection(
         self,
@@ -1930,6 +2023,52 @@ class MainView:
             value = "Automatisch"
         return f"{name} · {value}"
 
+    def _preview_trapping_radius(self) -> float:
+        indices = self.project.class_indices
+        trapping_mm = self.project.settings.trapping_mm
+        if indices is None or trapping_mm <= 0:
+            return 0.0
+
+        image_height, image_width = indices.shape
+        settings = self.project.settings
+        if settings.resize_mode == "pad":
+            image_ratio = image_width / image_height
+            output_ratio = settings.print_width_cm / settings.print_height_cm
+            if image_ratio > output_ratio:
+                pixels_per_mm = image_width / (settings.print_width_cm * 10.0)
+            else:
+                pixels_per_mm = image_height / (settings.print_height_cm * 10.0)
+        else:
+            left, top, right, bottom = normalize_crop_box(settings.crop_box)
+            crop_width = max(1.0, (right - left) * image_width)
+            crop_height = max(1.0, (bottom - top) * image_height)
+            horizontal_scale = crop_width / (settings.print_width_cm * 10.0)
+            vertical_scale = crop_height / (settings.print_height_cm * 10.0)
+            pixels_per_mm = (horizontal_scale + vertical_scale) / 2.0
+
+        # Sub-pixel trapping cannot be represented by discrete preview classes.
+        # Show at least one preview pixel whenever trapping is enabled.
+        return max(1.0, trapping_mm * pixels_per_mm)
+
+    def _refresh_trapping_simulation(self) -> None:
+        base = self._base_preview_simulation
+        palette = self._preview_palette
+        indices = self.project.class_indices
+        if base is None or palette is None or indices is None:
+            return
+
+        radius = self._preview_trapping_radius()
+        if radius <= 0:
+            simulation = base
+        else:
+            simulation = Simulation.render_trapped(indices, palette, radius)
+
+        previous = self.project.preview_image
+        self.project.preview_image = simulation
+        self.project.preview_array = np.asarray(simulation)
+        if previous is not None and previous is not base and previous is not simulation:
+            previous.close()
+
     def _update_preview_display(self, *, force_source: bool = False) -> None:
         simulation = self.project.preview_image
         if simulation is None:
@@ -1959,7 +2098,7 @@ class MainView:
                 color=self.project.settings.paper,
             )
             try:
-                self.preview.set_source(display)
+                _set_pil_source(self.preview, display)
             finally:
                 display.close()
             self.preview.set_content("")
@@ -1967,7 +2106,7 @@ class MainView:
             self.crop_reset_button.set_visibility(False)
         else:
             if force_source:
-                self.preview.set_source(simulation)
+                _set_pil_source(self.preview, simulation)
             self.preview.classes(add="crop-active")
             self._update_crop_overlay()
             self.crop_reset_button.set_visibility(True)
@@ -1981,6 +2120,54 @@ class MainView:
             )
         )
         self._update_preview_size_label()
+        self._refresh_plate_previews()
+
+    def _plate_preview_size(self, source_size: tuple[int, int]) -> tuple[int, int]:
+        output_width, output_height = self._export_work_size()
+        output_ratio = output_width / output_height
+        longest_edge = min(900, max(source_size))
+        if output_ratio >= 1.0:
+            return (longest_edge, max(1, round(longest_edge / output_ratio)))
+        return (max(1, round(longest_edge * output_ratio)), longest_edge)
+
+    def _refresh_plate_previews(self) -> None:
+        if not self.project.channels:
+            return
+        for ink, image_element in self._plate_previews:
+            channel = self.project.channels.get(ink.name)
+            if channel is None:
+                image_element.set_visibility(False)
+                continue
+            active = Image.fromarray(channel, mode="L")
+            target_size = self._plate_preview_size(active.size)
+            try:
+                if self.project.settings.resize_mode == "pad":
+                    framed = ImageOps.pad(
+                        active,
+                        target_size,
+                        method=Image.Resampling.NEAREST,
+                        color=0,
+                    )
+                else:
+                    framed = active.resize(
+                        target_size,
+                        resample=Image.Resampling.NEAREST,
+                        box=crop_box_pixels(
+                            self.project.settings.crop_box,
+                            active.size,
+                        ),
+                    )
+                try:
+                    plate = ImageOps.invert(framed)
+                    try:
+                        _set_pil_source(image_element, plate)
+                    finally:
+                        plate.close()
+                finally:
+                    framed.close()
+            finally:
+                active.close()
+            image_element.set_visibility(True)
 
     def _update_crop_overlay(self) -> None:
         simulation = self.project.preview_image
@@ -2083,12 +2270,20 @@ class MainView:
         self.preview_size.set_visibility(True)
 
     def _show_result(self, result: SeparationResult) -> None:
-        self.project.preview_image = result.simulation
-        self.project.preview_array = np.asarray(result.simulation)
+        previous_base = self._base_preview_simulation
+        previous_preview = self.project.preview_image
+        self._base_preview_simulation = result.simulation
+        self._preview_palette = result.palette
         self.project.class_indices = result.class_indices
         self.project.channels = result.channels
+        self._refresh_trapping_simulation()
+        if (
+            previous_base is not None
+            and previous_base is not previous_preview
+            and previous_base is not result.simulation
+        ):
+            previous_base.close()
 
-        self.preview.set_source(result.simulation)
         self.preview.set_visibility(True)
         self.status.set_text("Simulation aktuell")
         self._update_preview_display(force_source=True)
@@ -2126,15 +2321,6 @@ class MainView:
                     ).tooltip(tooltip)
                     ui.label(number).classes("text-[10px]").tooltip(tooltip)
 
-        for ink, image_element in self._plate_previews:
-            channel = result.channels.get(ink.name)
-            if channel is None:
-                image_element.set_visibility(False)
-                continue
-            plate = ImageOps.invert(Image.fromarray(channel, mode="L"))
-            image_element.set_source(plate)
-            image_element.set_visibility(True)
-
     async def export(self) -> None:
         if self.project.image is None:
             ui.notify("Bitte zuerst ein Bild laden.", type="warning")
@@ -2147,7 +2333,7 @@ class MainView:
             timeout=None,
         )
         try:
-            archive = await run.io_bound(
+            archive = await run.cpu_bound(
                 export_project,
                 self.project.image,
                 deepcopy(self.project.settings),
@@ -2161,7 +2347,13 @@ class MainView:
                 notification.type = "positive"
                 notification.timeout = 4
                 notification.update()
-        except (OSError, ValueError) as error:
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            MemoryError,
+            run.SubprocessException,
+        ) as error:
             notification.dismiss()
             ui.notify(f"Export fehlgeschlagen: {error}", type="negative")
         finally:
