@@ -1,9 +1,32 @@
 # Screenprint Separator
 
-NiceGUI-Anwendung zur Separation eines Bildes auf eine bis fünf frei definierbare
-Siebdruckfarben. Die Vorschau klassifiziert Bildfarben gegen alle möglichen
-Druckzustände – von zwei Zuständen bei einer Farbe bis zu 32 Zuständen bei fünf
-Farben.
+Mit dem Siebdruck-Separator lassen sich Negative beziehungsweise
+Siebdruckplatten digital vorbereiten. Das Programm berechnet und simuliert das Überdrucken der Farben. Es können eine bis fünf verschiedene Druckfarben ausgewählt und bis zu 32 Überdruckzustände simuliert werden.
+
+Dies ist ein Vibecoding-Projekt von mir, das ich überwiegend mit ChatGPT Codex
+(GPT-5.6 Sol, Reasoning-Stufe „High“) entwickelt habe.
+
+## Technologien und Libraries
+
+- **Python 3.13** als Programmiersprache und Laufzeit
+- **NiceGUI** für die lokale, browserbasierte Benutzeroberfläche
+- **NumPy** für Bilddaten, Masken und schnelle Pixeloperationen
+- **Pillow** für Bildbearbeitung, Skalierung und Datei-Export
+- **CIELAB D50 und CIEDE2000** für die wahrnehmungsbezogene Farbzuordnung
+- **uv** für Abhängigkeiten, virtuelle Umgebung und Projektbefehle
+- **PyInstaller / nicegui-pack** für eigenständige Windows- und macOS-Builds
+- **Ruff** für statische Codeprüfung
+- **GitHub Actions** für automatisierte macOS-Builds und Releases
+
+## TODO / Nice to have
+
+- Farbüberlagerung in einer Raster- beziehungsweise Halbtonvorschau integrieren
+- Rasterparameter wie Winkel, Frequenz und Punktform einstellbar machen
+- Bildbearbeitung ausbauen; derzeit sind vor allem Helligkeit, Kontrast,
+  Glättung und Zuschnitt verfügbar
+- ICC-Profile und weitergehendes Farbmanagement ergänzen
+- Undo/Redo sowie speicherbare Einstellungs- und Export-Presets hinzufügen
+- Passermarken und weitere Hilfen für die Druckvorstufe integrieren
 
 ## Entwicklung
 
@@ -201,6 +224,25 @@ Umsortieren, Ergänzen oder Löschen bleiben Referenzen ihrer jeweiligen
 Farbkombination zugeordnet.
 
 ## Export
+
+Die Export-Einpassung wird direkt in der Separationsvorschau dargestellt. Bei
+„Format füllen“ und „Freier Rahmen“ bleibt der exportierte Bereich hell, während
+abgeschnittene Bildteile leicht abgedunkelt werden. „Einpassen mit Rand“ zeigt
+das vollständige Bild einschließlich des ergänzten Papierbereichs.
+
+Der Rahmen verhält sich ähnlich wie das Freistellungswerkzeug in Photoshop:
+Ziehen innerhalb des Rahmens verschiebt ihn, Ziehen an einer Kante verändert
+diese Seite und Ziehen an einer Ecke skaliert ihn in beide Richtungen. Bei
+„Format füllen“ bleibt dabei das Seitenverhältnis des Druckformats gesperrt. Im
+Modus „Freier Rahmen“ darf es sich ändern und bestimmt dann automatisch das
+Seitenverhältnis des Druckformats und der exportierten Platten. Der Ausschnitt
+wird zusammen mit der Sitzung gespeichert. Rahmenlinien, Raster und Griffe
+werden nur während der aktiven Bearbeitung eingeblendet; die abgedunkelte
+Beschnittmaske bleibt zur Exportkontrolle sichtbar.
+
+Beim Auswählen von „Format füllen“ sowie nach Änderungen an Druckformat oder DPI
+wird zunächst wieder der größtmögliche Ausschnitt im festen Seitenverhältnis
+verwendet. Danach kann der Rahmen erneut verschoben oder verkleinert werden.
 
 Der ZIP-Export enthält:
 

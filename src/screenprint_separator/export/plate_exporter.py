@@ -13,6 +13,7 @@ from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.settings import Settings
 from screenprint_separator.processing.color_classifier import ColorClassifier
 from screenprint_separator.processing.color_converter import ColorConverter
+from screenprint_separator.processing.framing import crop_box_pixels
 from screenprint_separator.processing.palette import build_overprint_palette
 from screenprint_separator.processing.pipeline import (
     adjust_input_image,
@@ -48,8 +49,12 @@ def _trapping_pixels(settings: Settings) -> int:
 
 def _resize_for_print(image: Image.Image, settings: Settings) -> Image.Image:
     size = _work_size(settings)
-    if settings.resize_mode == "fit":
-        return ImageOps.fit(image, size, method=Image.Resampling.LANCZOS)
+    if settings.resize_mode in {"fit", "free"}:
+        return image.resize(
+            size,
+            resample=Image.Resampling.LANCZOS,
+            box=crop_box_pixels(settings.crop_box, image.size),
+        )
     if settings.resize_mode == "pad":
         return ImageOps.pad(
             image,
@@ -57,7 +62,7 @@ def _resize_for_print(image: Image.Image, settings: Settings) -> Image.Image:
             method=Image.Resampling.LANCZOS,
             color=settings.paper,
         )
-    raise ValueError('Skalierungsmodus muss "fit" oder "pad" sein.')
+    raise ValueError('Skalierungsmodus muss "fit", "pad" oder "free" sein.')
 
 
 def _classify_tiled(

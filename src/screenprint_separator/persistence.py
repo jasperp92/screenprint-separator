@@ -27,7 +27,7 @@ class SessionStore:
                 for key, value in data.get("settings", {}).items()
                 if key in allowed_settings
             }
-            for key in ("paper", "paper_lab"):
+            for key in ("paper", "paper_lab", "crop_box"):
                 if key in settings_data:
                     settings_data[key] = tuple(settings_data[key])
             settings = Settings(**settings_data)

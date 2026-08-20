@@ -18,6 +18,14 @@ from screenprint_separator.processing.color_library import (
     color_from_cmyk,
     rgb_to_cmyk,
 )
+from screenprint_separator.processing.framing import (
+    constrain_crop_box_to_aspect,
+    crop_aspect_ratio,
+    fit_crop_box,
+    move_crop_box,
+    normalize_crop_box,
+    resize_crop_box,
+)
 from screenprint_separator.processing.image_loader import ImageLoader
 from screenprint_separator.processing.palette import (
     build_overprint_palette,
@@ -112,6 +120,12 @@ class MainView:
         self._syncing_paper_controls = False
         self._syncing_ink_controls = False
         self._syncing_preview_size = False
+        self._syncing_print_size = False
+        self._crop_drag_start: tuple[float, float] | None = None
+        self._crop_drag_original: tuple[float, float, float, float] | None = None
+        self._crop_drag_action: str | None = None
+        self._crop_cursor_class: str | None = None
+        self._crop_active = False
 
         ui.add_css(
             """
@@ -119,6 +133,13 @@ class MainView:
             .settings-card { background: white; border: 1px solid #ded8cc; }
             .preview-card { background: #252525; color: white; min-height: 420px; }
             .preview-image > img { object-fit: contain !important; }
+            .preview-image.crop-active > img { cursor: crosshair; }
+            .preview-image.crop-cursor-move > img { cursor: move; }
+            .preview-image.crop-cursor-ew > img { cursor: ew-resize; }
+            .preview-image.crop-cursor-ns > img { cursor: ns-resize; }
+            .preview-image.crop-cursor-nwse > img { cursor: nwse-resize; }
+            .preview-image.crop-cursor-nesw > img { cursor: nesw-resize; }
+            .preview-image.crop-active { touch-action: none; user-select: none; }
             .input-uploader .q-uploader__list { display: none; }
             .warm-control {
                 background: #fffdf8 !important;
@@ -745,7 +766,11 @@ class MainView:
                 self.preview_spinner.set_visibility(False)
 
         self.status = ui.label("Noch kein Bild geladen").classes("text-grey-4")
-        self.preview = ui.interactive_image("").classes(
+        self.preview = ui.interactive_image(
+            "",
+            on_mouse=self._handle_crop_mouse,
+            events=["mousedown", "mousemove", "mouseup", "mouseleave"],
+        ).classes(
             "preview-image rounded-lg self-center"
         ).style("width: 100%; max-width: 100%")
         self.preview.set_visibility(False)
@@ -778,20 +803,20 @@ class MainView:
             "export-settings w-full text-white"
         ):
             with ui.row().classes("w-full"):
-                ui.number(
+                self.print_width_input = ui.number(
                     "Breite (cm)",
                     value=self.project.settings.print_width_cm,
                     min=1,
-                    on_change=lambda event: self._change_export_setting(
-                        "print_width_cm", event.value, float
+                    on_change=lambda event: self._change_print_dimension(
+                        "width", event.value
                     ),
                 ).classes("grow")
-                ui.number(
+                self.print_height_input = ui.number(
                     "Höhe (cm)",
                     value=self.project.settings.print_height_cm,
                     min=1,
-                    on_change=lambda event: self._change_export_setting(
-                        "print_height_cm", event.value, float
+                    on_change=lambda event: self._change_print_dimension(
+                        "height", event.value
                     ),
                 ).classes("grow")
             with ui.row().classes("w-full"):
@@ -824,14 +849,25 @@ class MainView:
                             "output_dpi", event.value, int
                         ),
                     ).props('aria-label="Ausgabe-DPI"').classes("w-full")
-            ui.select(
-                {"fit": "Format füllen", "pad": "Einpassen mit Rand"},
-                label="Separationsskalierung",
-                value=self.project.settings.resize_mode,
-                on_change=lambda event: self._change_export_setting(
-                    "resize_mode", event.value, str
-                ),
-            ).classes("w-full")
+            with ui.row().classes("w-full items-center gap-2"):
+                self.preview_mode_select = ui.select(
+                    {
+                        "fit": "Format füllen",
+                        "pad": "Einpassen mit Rand",
+                        "free": "Freier Rahmen",
+                    },
+                    label="Separationsskalierung",
+                    value=self.project.settings.resize_mode,
+                    on_change=self._change_resize_mode,
+                ).classes("grow")
+                self.crop_reset_button = ui.button(
+                    "Rahmen zurücksetzen",
+                    icon="crop_free",
+                    on_click=self._reset_crop_box,
+                ).props("flat dense no-caps").classes("shrink-0")
+            self.crop_reset_button.set_visibility(
+                self.project.settings.resize_mode != "pad"
+            )
         with ui.expansion("Trapping", icon="compare_arrows").classes(
             "export-settings w-full text-white"
         ):
@@ -885,13 +921,282 @@ class MainView:
         if value is None:
             return
         setattr(self.project.settings, name, converter(value))
+        if (
+            name in {"dpi", "output_dpi"}
+            and self.project.settings.resize_mode == "fit"
+        ):
+            self._maximize_fit_crop()
+            self._crop_active = False
+            self._update_preview_display()
         self._update_export_size_label()
+        self._save_session()
+
+    def _change_resize_mode(self, event: events.ValueChangeEventArguments) -> None:
+        if event.value not in {"fit", "pad", "free"}:
+            return
+        self.project.settings.resize_mode = event.value
+        self._crop_active = False
+        if event.value == "free":
+            self.project.settings.crop_box = normalize_crop_box(
+                self.project.settings.crop_box
+            )
+            self._sync_print_size_to_crop("width")
+        elif event.value == "fit":
+            self._maximize_fit_crop()
+        self.crop_reset_button.set_visibility(event.value != "pad")
+        self._update_export_size_label()
+        self._update_preview_display(force_source=True)
+        self._save_session()
+
+    def _change_print_dimension(
+        self,
+        dimension: str,
+        value: float | None,
+    ) -> None:
+        if self._syncing_print_size or value is None:
+            return
+        value = max(1.0, float(value))
+        if dimension == "width":
+            self.project.settings.print_width_cm = value
+        else:
+            self.project.settings.print_height_cm = value
+
+        if self.project.settings.resize_mode == "free":
+            self._sync_print_size_to_crop(dimension)
+        elif self.project.settings.resize_mode == "fit":
+            self._maximize_fit_crop()
+            self._crop_active = False
+        self._update_export_size_label()
+        self._update_preview_display()
+        self._save_session()
+
+    def _sync_print_size_to_crop(self, anchor: str = "width") -> None:
+        if self.project.image is None:
+            return
+        ratio = crop_aspect_ratio(
+            self.project.settings.crop_box,
+            self.project.image.size,
+        )
+        if ratio <= 0:
+            return
+        if anchor == "height":
+            self.project.settings.print_width_cm = (
+                self.project.settings.print_height_cm * ratio
+            )
+            if self.project.settings.print_width_cm < 1.0:
+                self.project.settings.print_width_cm = 1.0
+                self.project.settings.print_height_cm = 1.0 / ratio
+        else:
+            self.project.settings.print_height_cm = (
+                self.project.settings.print_width_cm / ratio
+            )
+            if self.project.settings.print_height_cm < 1.0:
+                self.project.settings.print_height_cm = 1.0
+                self.project.settings.print_width_cm = ratio
+        self._syncing_print_size = True
+        try:
+            self.print_width_input.set_value(
+                round(self.project.settings.print_width_cm, 3)
+            )
+            self.print_height_input.set_value(
+                round(self.project.settings.print_height_cm, 3)
+            )
+        finally:
+            self._syncing_print_size = False
+
+    def _reset_crop_box(self) -> None:
+        if self.project.image is None:
+            return
+        if self.project.settings.resize_mode == "fit":
+            self._maximize_fit_crop()
+        else:
+            self.project.settings.crop_box = (0.0, 0.0, 1.0, 1.0)
+            self._sync_print_size_to_crop("width")
+        self._crop_active = False
+        self._update_export_size_label()
+        self._update_preview_display()
+        self._save_session()
+
+    def _constrain_crop_to_print_aspect(self) -> None:
+        if self.project.image is None:
+            return
+        self.project.settings.crop_box = constrain_crop_box_to_aspect(
+            self.project.settings.crop_box,
+            self.project.image.size,
+            self._export_work_size(),
+        )
+
+    def _maximize_fit_crop(self) -> None:
+        if self.project.image is None:
+            return
+        self.project.settings.crop_box = fit_crop_box(
+            self.project.image.size,
+            self._export_work_size(),
+        )
+
+    def _handle_crop_mouse(self, event: events.MouseEventArguments) -> None:
+        if (
+            self.project.settings.resize_mode not in {"fit", "free"}
+            or self.project.preview_image is None
+        ):
+            return
+        width, height = self.project.preview_image.size
+        point = (
+            float(np.clip(event.image_x / width, 0, 1)),
+            float(np.clip(event.image_y / height, 0, 1)),
+        )
+        if event.type == "mousedown" and event.button == 0:
+            action = self._crop_action_at(point)
+            if action is None:
+                self._crop_active = False
+                self._set_crop_cursor(None)
+                self._update_crop_overlay()
+                return
+            self._crop_active = True
+            self._update_crop_overlay()
+            self._crop_drag_start = point
+            self._crop_drag_original = self.project.settings.crop_box
+            self._crop_drag_action = action
+            self._set_crop_cursor(action)
+            return
+        if self._crop_drag_start is None:
+            if event.type == "mousemove":
+                self._set_crop_cursor(self._crop_action_at(point))
+            elif event.type == "mouseleave":
+                self._crop_active = False
+                self._set_crop_cursor(None)
+                self._update_crop_overlay()
+            return
+        if event.type == "mousemove":
+            if event.buttons & 1:
+                self._apply_crop_drag(point)
+            else:
+                self._finish_crop_drag(point)
+        elif event.type in {"mouseup", "mouseleave"}:
+            self._finish_crop_drag(point)
+            if event.type == "mouseleave":
+                self._crop_active = False
+                self._set_crop_cursor(None)
+                self._update_crop_overlay()
+
+    def _crop_action_at(self, point: tuple[float, float]) -> str | None:
+        if self.project.preview_image is None:
+            return None
+        left, top, right, bottom = normalize_crop_box(
+            self.project.settings.crop_box
+        )
+        width, height = self.project.preview_image.size
+        tolerance_x = max(8.0 / width, 0.012)
+        tolerance_y = max(8.0 / height, 0.012)
+        x, y = point
+        if not self._crop_active:
+            return "move" if left < x < right and top < y < bottom else None
+        near_left = abs(x - left) <= tolerance_x
+        near_right = abs(x - right) <= tolerance_x
+        near_top = abs(y - top) <= tolerance_y
+        near_bottom = abs(y - bottom) <= tolerance_y
+        within_x = left - tolerance_x <= x <= right + tolerance_x
+        within_y = top - tolerance_y <= y <= bottom + tolerance_y
+
+        if near_left and near_top:
+            return "left_top"
+        if near_right and near_top:
+            return "right_top"
+        if near_left and near_bottom:
+            return "left_bottom"
+        if near_right and near_bottom:
+            return "right_bottom"
+        if near_left and within_y:
+            return "left"
+        if near_right and within_y:
+            return "right"
+        if near_top and within_x:
+            return "top"
+        if near_bottom and within_x:
+            return "bottom"
+        if left < x < right and top < y < bottom:
+            return "move"
+        return None
+
+    def _set_crop_cursor(self, action: str | None) -> None:
+        if action == "move":
+            cursor_class = "crop-cursor-move"
+        elif action in {"left", "right"}:
+            cursor_class = "crop-cursor-ew"
+        elif action in {"top", "bottom"}:
+            cursor_class = "crop-cursor-ns"
+        elif action in {"left_top", "right_bottom"}:
+            cursor_class = "crop-cursor-nwse"
+        elif action in {"right_top", "left_bottom"}:
+            cursor_class = "crop-cursor-nesw"
+        else:
+            cursor_class = None
+        if cursor_class == self._crop_cursor_class:
+            return
+        if self._crop_cursor_class is not None:
+            self.preview.classes(remove=self._crop_cursor_class)
+        if cursor_class is not None:
+            self.preview.classes(add=cursor_class)
+        self._crop_cursor_class = cursor_class
+
+    def _apply_crop_drag(self, point: tuple[float, float]) -> None:
+        if (
+            self._crop_drag_start is None
+            or self._crop_drag_original is None
+            or self._crop_drag_action is None
+            or self.project.preview_image is None
+        ):
+            return
+        if self._crop_drag_action == "move":
+            self.project.settings.crop_box = move_crop_box(
+                self._crop_drag_original,
+                point[0] - self._crop_drag_start[0],
+                point[1] - self._crop_drag_start[1],
+            )
+        else:
+            width, height = self.project.preview_image.size
+            if self.project.settings.resize_mode == "fit":
+                output_width, output_height = self._export_work_size()
+                image_width, image_height = (
+                    self.project.image.size
+                    if self.project.image is not None
+                    else self.project.preview_image.size
+                )
+                aspect_ratio = (output_width / output_height) / (
+                    image_width / image_height
+                )
+            else:
+                aspect_ratio = None
+            self.project.settings.crop_box = resize_crop_box(
+                self._crop_drag_original,
+                self._crop_drag_action,
+                point,
+                aspect_ratio=aspect_ratio,
+                minimum_size=(12.0 / width, 12.0 / height),
+            )
+        self._update_crop_overlay()
+        self._update_preview_size_label()
+
+    def _finish_crop_drag(self, point: tuple[float, float]) -> None:
+        if self._crop_drag_action is None:
+            return
+        self._apply_crop_drag(point)
+        changed = self.project.settings.crop_box != self._crop_drag_original
+        self._crop_drag_start = None
+        self._crop_drag_original = None
+        self._crop_drag_action = None
+        self._set_crop_cursor(self._crop_action_at(point))
+        if not changed:
+            return
+        if self.project.settings.resize_mode == "free":
+            self._sync_print_size_to_crop("width")
+        self._update_export_size_label()
+        self._update_preview_size_label()
         self._save_session()
 
     def _update_export_size_label(self) -> None:
         settings = self.project.settings
-        work_width = round(settings.print_width_cm / 2.54 * settings.dpi)
-        work_height = round(settings.print_height_cm / 2.54 * settings.dpi)
+        work_width, work_height = self._export_work_size()
         output_width = round(settings.print_width_cm / 2.54 * settings.output_dpi)
         output_height = round(settings.print_height_cm / 2.54 * settings.output_dpi)
         trapping_pixels = round(settings.trapping_mm / 25.4 * settings.output_dpi)
@@ -899,6 +1204,13 @@ class MainView:
             f"Separation: {work_width} × {work_height} px · "
             f"Ausgabe: {output_width} × {output_height} px · "
             f"Trapping: {trapping_pixels} px"
+        )
+
+    def _export_work_size(self) -> tuple[int, int]:
+        settings = self.project.settings
+        return (
+            max(1, round(settings.print_width_cm / 2.54 * settings.dpi)),
+            max(1, round(settings.print_height_cm / 2.54 * settings.dpi)),
         )
 
     def _change_input_tone(self, name: str, value: float | None) -> None:
@@ -1467,6 +1779,13 @@ class MainView:
             return
 
         width, height = self.project.image.size
+        self._crop_active = False
+        self.project.settings.crop_box = (0.0, 0.0, 1.0, 1.0)
+        if self.project.settings.resize_mode == "free":
+            self._sync_print_size_to_crop("width")
+            self._update_export_size_label()
+        elif self.project.settings.resize_mode == "fit":
+            self._maximize_fit_crop()
         preview_width = self.project.settings.preview_width
         self._set_preview_dimensions(
             preview_width,
@@ -1498,6 +1817,14 @@ class MainView:
         except OSError:
             size = "Cache"
         width, height = self.project.image.size
+        self.project.settings.crop_box = normalize_crop_box(
+            self.project.settings.crop_box
+        )
+        if self.project.settings.resize_mode == "free":
+            self._sync_print_size_to_crop("width")
+            self._update_export_size_label()
+        elif self.project.settings.resize_mode == "fit":
+            self._constrain_crop_to_print_aspect()
         preview_width = self.project.settings.preview_width
         self._set_preview_dimensions(
             preview_width,
@@ -1603,6 +1930,158 @@ class MainView:
             value = "Automatisch"
         return f"{name} · {value}"
 
+    def _update_preview_display(self, *, force_source: bool = False) -> None:
+        simulation = self.project.preview_image
+        if simulation is None:
+            return
+        self._set_crop_cursor(None)
+        mode = self.project.settings.resize_mode
+        display_size = simulation.size
+
+        if mode == "pad":
+            image_width, image_height = simulation.size
+            output_width, output_height = self._export_work_size()
+            output_ratio = output_width / output_height
+            image_ratio = image_width / image_height
+            if image_ratio > output_ratio:
+                display_size = (image_width, max(1, round(image_width / output_ratio)))
+            else:
+                display_size = (max(1, round(image_height * output_ratio)), image_height)
+            scale = min(1.0, 1800 / max(display_size))
+            display_size = (
+                max(1, round(display_size[0] * scale)),
+                max(1, round(display_size[1] * scale)),
+            )
+            display = ImageOps.pad(
+                simulation,
+                display_size,
+                method=Image.Resampling.LANCZOS,
+                color=self.project.settings.paper,
+            )
+            try:
+                self.preview.set_source(display)
+            finally:
+                display.close()
+            self.preview.set_content("")
+            self.preview.classes(remove="crop-active")
+            self.crop_reset_button.set_visibility(False)
+        else:
+            if force_source:
+                self.preview.set_source(simulation)
+            self.preview.classes(add="crop-active")
+            self._update_crop_overlay()
+            self.crop_reset_button.set_visibility(True)
+
+        width, height = display_size
+        aspect_ratio = width / height
+        self.preview.style(
+            replace=(
+                f"width: min(100%, calc(70vh * {aspect_ratio:.8f})); "
+                f"max-width: 100%; aspect-ratio: {width} / {height}"
+            )
+        )
+        self._update_preview_size_label()
+
+    def _update_crop_overlay(self) -> None:
+        simulation = self.project.preview_image
+        if simulation is None or self.project.settings.resize_mode == "pad":
+            return
+        width, height = simulation.size
+        box = normalize_crop_box(self.project.settings.crop_box)
+
+        left, top, right, bottom = box
+        x0, y0 = left * width, top * height
+        x1, y1 = right * width, bottom * height
+        selection_width, selection_height = x1 - x0, y1 - y0
+        stroke_width = max(1.5, min(width, height) / 350)
+        overlay = [
+            (
+                f'<rect x="0" y="0" width="{width}" height="{y0:.3f}" '
+                'fill="rgba(0,0,0,.48)"/>'
+            ),
+            (
+                f'<rect x="0" y="{y1:.3f}" width="{width}" '
+                f'height="{max(0.0, height - y1):.3f}" '
+                'fill="rgba(0,0,0,.48)"/>'
+            ),
+            (
+                f'<rect x="0" y="{y0:.3f}" width="{x0:.3f}" '
+                f'height="{selection_height:.3f}" fill="rgba(0,0,0,.48)"/>'
+            ),
+            (
+                f'<rect x="{x1:.3f}" y="{y0:.3f}" '
+                f'width="{max(0.0, width - x1):.3f}" '
+                f'height="{selection_height:.3f}" fill="rgba(0,0,0,.48)"/>'
+            ),
+        ]
+        if self._crop_active:
+            overlay.append(
+                f'<rect x="{x0:.3f}" y="{y0:.3f}" '
+                f'width="{selection_width:.3f}" '
+                f'height="{selection_height:.3f}" fill="none" stroke="white" '
+                f'stroke-width="{stroke_width:.3f}"/>'
+            )
+            grid_color = "rgba(255,255,255,.58)"
+            for fraction in (1 / 3, 2 / 3):
+                grid_x = x0 + selection_width * fraction
+                grid_y = y0 + selection_height * fraction
+                overlay.append(
+                    f'<line x1="{grid_x:.3f}" y1="{y0:.3f}" '
+                    f'x2="{grid_x:.3f}" y2="{y1:.3f}" stroke="{grid_color}" '
+                    f'stroke-width="{stroke_width / 2:.3f}"/>'
+                )
+                overlay.append(
+                    f'<line x1="{x0:.3f}" y1="{grid_y:.3f}" '
+                    f'x2="{x1:.3f}" y2="{grid_y:.3f}" stroke="{grid_color}" '
+                    f'stroke-width="{stroke_width / 2:.3f}"/>'
+                )
+            handle_size = max(8.0, min(width, height) / 70.0)
+            half_handle = handle_size / 2.0
+            handle_points = (
+                (x0, y0),
+                ((x0 + x1) / 2.0, y0),
+                (x1, y0),
+                (x0, (y0 + y1) / 2.0),
+                (x1, (y0 + y1) / 2.0),
+                (x0, y1),
+                ((x0 + x1) / 2.0, y1),
+                (x1, y1),
+            )
+            for handle_x, handle_y in handle_points:
+                overlay.append(
+                    f'<rect x="{handle_x - half_handle:.3f}" '
+                    f'y="{handle_y - half_handle:.3f}" '
+                    f'width="{handle_size:.3f}" height="{handle_size:.3f}" '
+                    'fill="white" stroke="rgba(0,0,0,.75)" '
+                    f'stroke-width="{stroke_width / 2:.3f}"/>'
+                )
+        self.preview.set_content("".join(overlay))
+
+    def _update_preview_size_label(self) -> None:
+        simulation = self.project.preview_image
+        if simulation is None:
+            return
+        width, height = simulation.size
+        mode = self.project.settings.resize_mode
+        if mode == "free":
+            left, top, right, bottom = normalize_crop_box(
+                self.project.settings.crop_box
+            )
+            crop_width = max(1, round((right - left) * width))
+            crop_height = max(1, round((bottom - top) * height))
+            suffix = f" · Ausschnitt: {crop_width} × {crop_height} px"
+        elif mode == "fit":
+            left, top, right, bottom = normalize_crop_box(
+                self.project.settings.crop_box
+            )
+            crop_width = max(1, round((right - left) * width))
+            crop_height = max(1, round((bottom - top) * height))
+            suffix = f" · Exportbereich: {crop_width} × {crop_height} px"
+        else:
+            suffix = " · vollständiges Bild mit Rand"
+        self.preview_size.set_text(f"Vorschaugröße: {width} × {height} px{suffix}")
+        self.preview_size.set_visibility(True)
+
     def _show_result(self, result: SeparationResult) -> None:
         self.project.preview_image = result.simulation
         self.project.preview_array = np.asarray(result.simulation)
@@ -1612,16 +2091,7 @@ class MainView:
         self.preview.set_source(result.simulation)
         self.preview.set_visibility(True)
         self.status.set_text("Simulation aktuell")
-        width, height = result.simulation.size
-        aspect_ratio = width / height
-        self.preview.style(
-            replace=(
-                f"width: min(100%, calc(70vh * {aspect_ratio:.8f})); "
-                f"max-width: 100%; aspect-ratio: {width} / {height}"
-            )
-        )
-        self.preview_size.set_text(f"Vorschaugröße: {width} × {height} px")
-        self.preview_size.set_visibility(True)
+        self._update_preview_display(force_source=True)
 
         self.palette_row.clear()
         with self.palette_row:

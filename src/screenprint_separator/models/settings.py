@@ -8,6 +8,7 @@ class Settings:
     dpi: int = 300
     output_dpi: int = 600
     resize_mode: str = "fit"
+    crop_box: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
     preview_max_size: int = 1200
     preview_width: int = 1200
     preview_height: int = 1200
