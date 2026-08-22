@@ -212,9 +212,11 @@ Farbauszug:
 }
 ```
 
-Alternativ kann eine eigene LAB-Referenzfarbe für das Papier eingegeben werden.
-Die Papierfarbe wird für den unbedruckten Hintergrund, die Papier-Klasse und
-gegebenenfalls freie Ränder beim Einpassen verwendet.
+Alternativ kann die Papierfarbe über CMYK-Werte oder den dazugehörigen
+Farbwähler gewählt oder als eigene LAB-Referenzfarbe eingegeben werden. Der
+Farbwähler verwendet technisch sRGB und rechnet die Auswahl – wie bei den
+Druckfarben – in CMYK um. Die Papierfarbe wird für den unbedruckten Hintergrund,
+die Papier-Klasse und gegebenenfalls freie Ränder beim Einpassen verwendet.
 
 ## Mischfarben
 

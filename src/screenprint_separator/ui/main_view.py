@@ -46,6 +46,15 @@ def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     return "#" + "".join(f"{value:02x}" for value in rgb)
 
 
+def _hex_to_rgb(value: str | None) -> tuple[int, int, int] | None:
+    if not value or len(value) != 7 or not value.startswith("#"):
+        return None
+    try:
+        return tuple(int(value[index : index + 2], 16) for index in (1, 3, 5))
+    except ValueError:
+        return None
+
+
 def _set_pil_source(element: object, image: Image.Image) -> None:
     """Give NiceGUI a temporary path instead of retaining a PIL object."""
     element.set_source(pil_to_tempfile(image, "PNG"))
@@ -96,6 +105,8 @@ class MainView:
         paper_entry = self.color_library.by_id.get(settings.paper_id)
         if paper_entry is not None and paper_entry.system == "paper":
             settings.paper = paper_entry.rgb
+            settings.paper_cmyk = rgb_to_cmyk(paper_entry.rgb)
+            settings.paper_lab = paper_entry.lab
 
         defaults = [
             entry for entry in self.color_library.entries if entry.system != "paper"
@@ -120,6 +131,14 @@ class MainView:
         )
         self.session_store = SessionStore(session_root)
         self.project, self._cached_filename = self.session_store.load(fallback_project)
+        if self.project.settings.paper_source == "rgb":
+            # Migrate sessions created before paper CMYK controls were available.
+            self.project.settings.paper_cmyk = rgb_to_cmyk(
+                self.project.settings.paper
+            )
+            self.project.settings.paper_source = "cmyk"
+        elif self.project.settings.paper_source not in {"library", "cmyk", "lab"}:
+            self.project.settings.paper_source = "library"
         self._preview_busy = False
         self._preview_dirty = False
         self._ink_controls: dict[int, dict[str, object]] = {}
@@ -393,7 +412,11 @@ class MainView:
             self.paper_summary = ui.label().classes("text-sm grow truncate")
         with paper_card:
             self.paper_source = ui.toggle(
-                {"library": "Papier", "lab": "LAB-Referenzfarbe"},
+                {
+                    "library": "Papier",
+                    "cmyk": "CMYK",
+                    "lab": "LAB-Referenzfarbe",
+                },
                 value=self.project.settings.paper_source,
                 on_change=self._change_paper_source,
             ).props("spread no-caps").classes("w-full")
@@ -403,6 +426,27 @@ class MainView:
                     label="Papier aus JSON",
                     value=self.project.settings.paper_id,
                     on_change=self._change_paper_selection,
+                ).classes("w-full")
+            with ui.column().classes("w-full gap-2 px-2 pb-2") as paper_cmyk_group:
+                with ui.row().classes("w-full gap-2"):
+                    self.paper_cmyk_inputs = []
+                    for index, label in enumerate(("C %", "M %", "Y %", "K %")):
+                        field = ui.number(
+                            label,
+                            value=round(self.project.settings.paper_cmyk[index], 1),
+                            min=0,
+                            max=100,
+                            step=0.5,
+                            on_change=lambda event, index=index: (
+                                self._change_paper_cmyk(index, event.value)
+                            ),
+                        ).classes("grow min-w-[65px]")
+                        self.paper_cmyk_inputs.append(field)
+                self.paper_color_picker = ui.color_input(
+                    "Farbwähler (Vorschau → CMYK)",
+                    value=_rgb_to_hex(self.project.settings.paper),
+                    preview=True,
+                    on_change=self._change_paper_color_picker,
                 ).classes("w-full")
             with (
                 ui.column().classes("w-full px-2 pb-2") as paper_lab_group,
@@ -424,6 +468,7 @@ class MainView:
                     ).classes("grow min-w-[70px]")
                     self.paper_lab_inputs.append(field)
             self.paper_library_group = paper_library_group
+            self.paper_cmyk_group = paper_cmyk_group
             self.paper_lab_group = paper_lab_group
         self._sync_paper_controls()
 
@@ -1361,6 +1406,7 @@ class MainView:
             return
         self.project.settings.paper_id = entry.id
         self.project.settings.paper = entry.rgb
+        self.project.settings.paper_cmyk = rgb_to_cmyk(entry.rgb)
         self.project.settings.paper_lab = entry.lab
         self.project.settings.paper_source = "library"
         self._sync_paper_controls()
@@ -1368,19 +1414,60 @@ class MainView:
         self.schedule_preview()
 
     def _change_paper_source(self, event: events.ValueChangeEventArguments) -> None:
-        if self._syncing_paper_controls or event.value not in {"library", "lab"}:
+        if self._syncing_paper_controls or event.value not in {
+            "library",
+            "cmyk",
+            "lab",
+        }:
             return
         self.project.settings.paper_source = event.value
         if event.value == "library":
             entry = self.color_library.by_id.get(self.project.settings.paper_id)
             if entry is not None and entry.system == "paper":
                 self.project.settings.paper = entry.rgb
+                self.project.settings.paper_cmyk = rgb_to_cmyk(entry.rgb)
                 self.project.settings.paper_lab = entry.lab
-        else:
+        elif event.value == "lab":
             rgb = ColorConverter.lab_to_rgb(
                 np.asarray(self.project.settings.paper_lab, dtype=np.float32)
             )
             self.project.settings.paper = tuple(int(value) for value in rgb)
+            self.project.settings.paper_cmyk = rgb_to_cmyk(
+                self.project.settings.paper
+            )
+        else:
+            self.project.settings.paper, self.project.settings.paper_lab = (
+                color_from_cmyk(self.project.settings.paper_cmyk)
+            )
+        self._sync_paper_controls()
+        self._sync_automatic_mixture_controls()
+        self.schedule_preview()
+
+    def _change_paper_cmyk(self, index: int, value: float | None) -> None:
+        if self._syncing_paper_controls or value is None:
+            return
+        components = list(self.project.settings.paper_cmyk)
+        components[index] = float(np.clip(value, 0.0, 100.0))
+        self.project.settings.paper_cmyk = tuple(components)
+        self.project.settings.paper, self.project.settings.paper_lab = (
+            color_from_cmyk(self.project.settings.paper_cmyk)
+        )
+        self.project.settings.paper_source = "cmyk"
+        self._sync_paper_controls()
+        self._sync_automatic_mixture_controls()
+        self.schedule_preview()
+
+    def _change_paper_color_picker(self, event: events.ValueChangeEventArguments) -> None:
+        if self._syncing_paper_controls:
+            return
+        rgb = _hex_to_rgb(event.value)
+        if rgb is None:
+            return
+        self.project.settings.paper_cmyk = rgb_to_cmyk(rgb)
+        self.project.settings.paper, self.project.settings.paper_lab = (
+            color_from_cmyk(self.project.settings.paper_cmyk)
+        )
+        self.project.settings.paper_source = "cmyk"
         self._sync_paper_controls()
         self._sync_automatic_mixture_controls()
         self.schedule_preview()
@@ -1394,6 +1481,7 @@ class MainView:
         self.project.settings.paper_lab = tuple(lab)
         rgb = ColorConverter.lab_to_rgb(np.asarray(lab, dtype=np.float32))
         self.project.settings.paper = tuple(int(component) for component in rgb)
+        self.project.settings.paper_cmyk = rgb_to_cmyk(self.project.settings.paper)
         self.project.settings.paper_source = "lab"
         self._sync_paper_controls()
         self._sync_automatic_mixture_controls()
@@ -1407,7 +1495,14 @@ class MainView:
             self.paper_summary.set_text(
                 entry.name
                 if source == "library" and entry is not None
-                else "LAB-Referenzfarbe"
+                else (
+                    "CMYK "
+                    + "/".join(
+                        f"{value:g}" for value in self.project.settings.paper_cmyk
+                    )
+                    if source == "cmyk"
+                    else "LAB-Referenzfarbe"
+                )
             )
             self.paper_swatch.style(
                 replace=(
@@ -1418,8 +1513,18 @@ class MainView:
             )
             self.paper_source.set_value(source)
             self.paper_library_group.set_visibility(source == "library")
+            self.paper_cmyk_group.set_visibility(source == "cmyk")
             self.paper_lab_group.set_visibility(source == "lab")
             self.paper_select.set_value(self.project.settings.paper_id)
+            self.paper_color_picker.set_value(
+                _rgb_to_hex(self.project.settings.paper)
+            )
+            for field, value in zip(
+                self.paper_cmyk_inputs,
+                self.project.settings.paper_cmyk,
+                strict=True,
+            ):
+                field.set_value(round(float(value), 1))
             for field, value in zip(
                 self.paper_lab_inputs,
                 self.project.settings.paper_lab,
@@ -1548,11 +1653,8 @@ class MainView:
     def _change_ink_color_picker(self, ink: Ink, value: str | None) -> None:
         if self._syncing_ink_controls:
             return
-        if not value or len(value) != 7 or not value.startswith("#"):
-            return
-        try:
-            rgb = tuple(int(value[index : index + 2], 16) for index in (1, 3, 5))
-        except ValueError:
+        rgb = _hex_to_rgb(value)
+        if rgb is None:
             return
         ink.cmyk = rgb_to_cmyk(rgb)
         ink.rgb_preview, ink.lab = color_from_cmyk(ink.cmyk)
@@ -1653,6 +1755,7 @@ class MainView:
             self.project.settings.paper_id = paper_id
         if self.project.settings.paper_source == "library" and paper_entry is not None:
             self.project.settings.paper = paper_entry.rgb
+            self.project.settings.paper_cmyk = rgb_to_cmyk(paper_entry.rgb)
             self.project.settings.paper_lab = paper_entry.lab
         self.paper_select.set_options(paper_options, value=paper_id)
         self._sync_paper_controls()
@@ -1997,6 +2100,11 @@ class MainView:
         if state == 0:
             if self.project.settings.paper_source == "lab":
                 return "Papier · LAB-Referenzfarbe"
+            if self.project.settings.paper_source == "cmyk":
+                components = "/".join(
+                    f"{value:g}" for value in self.project.settings.paper_cmyk
+                )
+                return f"Papier · CMYK {components}"
             entry = self.color_library.by_id.get(self.project.settings.paper_id)
             return f"Papier · {entry.name if entry is not None else 'Papierfarbe'}"
         if state <= len(self.project.inks):
