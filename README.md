@@ -26,8 +26,7 @@ Dies ist ein Vibecoding-Projekt von mir, das ich überwiegend mit ChatGPT Codex
 
 - Farbüberlagerung in einer Raster- beziehungsweise Halbtonvorschau integrieren
 - Rasterparameter wie Winkel, Frequenz und Punktform einstellbar machen
-- Bildbearbeitung ausbauen; derzeit sind vor allem Helligkeit, Kontrast,
-  Glättung und Zuschnitt verfügbar
+- Bildbearbeitung um weitere stapelbare Effekte und Presets ausbauen
 - ICC-Profile und weitergehendes Farbmanagement ergänzen
 - Undo/Redo sowie speicherbare Einstellungs- und Export-Presets hinzufügen
 - Passermarken und weitere Hilfen für die Druckvorstufe integrieren
@@ -160,6 +159,22 @@ unsignierten Build. Für eine öffentliche Verteilung müssen später
 Developer-ID-Zertifikat und Notarisierungsdaten als GitHub-Secrets ergänzt
 werden.
 
+## Effekte
+
+Über das Plus im Bereich „Effekte“ können beliebig viele Bildkorrekturen
+hinzugefügt werden. Die Karten lassen sich per Drag & Drop sortieren und werden
+von oben nach unten auf das Eingabebild angewandt. Verfügbar sind derzeit:
+
+- Sättigung / Dynamik
+- Helligkeit / Kontrast
+- Schwarzweiß mit einstellbarer Stärke
+- Tonwertkorrektur mit RGB-Histogramm, Schwarzpunkt, Gamma und Weißpunkt
+- Farbtonverschiebung von −180° bis +180° mit zyklischer Farbvorschau
+
+Die Effekte sind nicht-destruktiv, werden in der Sitzung gespeichert und gelten
+gleichermaßen für Vorschau und Export. „Textur und Glättung“ bleibt ein eigener
+Verarbeitungsschritt und wird nach dem Effektstapel angewandt.
+
 ## Farbverarbeitung
 
 - CIELAB D50 für Eingabe- und Palettenfarben
@@ -170,7 +185,7 @@ werden.
 - automatisch per RGB-Alphamischung angenäherte oder manuell referenzierte
   Mischfarben für alle Überdruckkombinationen
 - CMYK-Eingabe oder Auswahl aus einer lokalen JSON-Farbbibliothek
-- nicht-destruktive Helligkeits- und Kontrastkorrektur des Eingabebildes
+- geordneter, nicht-destruktiver Effektstapel für das Eingabebild
 
 ## CMYK und Pantone
 

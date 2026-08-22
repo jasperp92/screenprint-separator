@@ -9,17 +9,15 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
 
+from screenprint_separator.models.effect import ImageEffect
 from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.settings import Settings
 from screenprint_separator.processing.color_classifier import ColorClassifier
 from screenprint_separator.processing.color_converter import ColorConverter
+from screenprint_separator.processing.effects import apply_effects
 from screenprint_separator.processing.framing import crop_box_pixels
 from screenprint_separator.processing.palette import build_overprint_palette
-from screenprint_separator.processing.pipeline import (
-    adjust_input_image,
-    smooth_classes,
-    smooth_texture,
-)
+from screenprint_separator.processing.pipeline import smooth_classes, smooth_texture
 from screenprint_separator.processing.simulation import Simulation
 
 
@@ -199,6 +197,7 @@ def export_project(
     settings: Settings,
     inks: list[Ink],
     measured_lab: dict[int, tuple[float, float, float]] | None = None,
+    effects: list[ImageEffect] | None = None,
 ) -> Path:
     export_dir = Path(tempfile.mkdtemp(prefix="screenprint_separator_"))
     labels_path = export_dir / "classification.dat"
@@ -207,7 +206,7 @@ def export_project(
     try:
         resized = _resize_for_print(image, settings)
         try:
-            work_image = adjust_input_image(resized, settings)
+            work_image = apply_effects(resized, effects or [])
         finally:
             resized.close()
 
@@ -261,6 +260,7 @@ def export_project(
         manifest = {
             "format": "screenprint-separator-project-v1",
             "settings": asdict(settings),
+            "effects": [asdict(effect) for effect in effects or []],
             "print_order": [ink.name for ink in inks],
             "inks": [asdict(ink) for ink in inks],
             "palette": [

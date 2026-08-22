@@ -8,6 +8,7 @@ from nicegui.elements.image import pil_to_tempfile
 from PIL import Image, ImageOps
 
 from screenprint_separator.export.plate_exporter import export_project
+from screenprint_separator.models.effect import EFFECT_NAMES, ImageEffect
 from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.project import Project
 from screenprint_separator.models.settings import Settings
@@ -19,6 +20,7 @@ from screenprint_separator.processing.color_library import (
     color_from_cmyk,
     rgb_to_cmyk,
 )
+from screenprint_separator.processing.effects import apply_effect, apply_effects
 from screenprint_separator.processing.framing import (
     constrain_crop_box_to_aspect,
     crop_aspect_ratio,
@@ -36,7 +38,6 @@ from screenprint_separator.processing.palette import (
 )
 from screenprint_separator.processing.pipeline import (
     SeparationResult,
-    adjust_input_image,
     process_image,
 )
 from screenprint_separator.processing.simulation import Simulation
@@ -141,6 +142,7 @@ class MainView:
             self.project.settings.paper_source = "library"
         self._preview_busy = False
         self._preview_dirty = False
+        self._effect_controls: dict[int, dict[str, object]] = {}
         self._ink_controls: dict[int, dict[str, object]] = {}
         self._plate_previews: list[tuple[Ink, object]] = []
         self._mixture_controls: dict[int, dict[str, object]] = {}
@@ -234,6 +236,69 @@ class MainView:
                 white-space: nowrap;
                 text-overflow: ellipsis;
             }
+            .effect-drag-handle { cursor: grab; touch-action: none; }
+            .effect-drag-handle:active { cursor: grabbing; }
+            .effect-card > .q-expansion-item__container > .q-item {
+                min-width: 0;
+                padding-left: 8px;
+                padding-right: 4px;
+            }
+            .effect-card-header,
+            .effect-card-summary {
+                min-width: 0;
+                overflow: hidden;
+            }
+            .effect-card-summary {
+                white-space: nowrap;
+                text-overflow: ellipsis;
+            }
+            .effect-histogram svg {
+                display: block;
+                width: 100%;
+                height: 104px;
+            }
+            .hue-gradient-slider .q-slider__track-container {
+                height: 32px !important;
+                border: 1px solid #777;
+                border-radius: 6px;
+                background: linear-gradient(to right,
+                    #00ffff 0%, #0000ff 16.67%, #ff00ff 33.33%,
+                    #ff0000 50%, #ffff00 66.67%, #00ff00 83.33%,
+                    #00ffff 100%) !important;
+                opacity: 1 !important;
+            }
+            .hue-gradient-slider .q-slider__track,
+            .hue-gradient-slider .q-slider__selection {
+                background: transparent !important;
+                opacity: 1 !important;
+            }
+            .hue-gradient-slider .q-slider__thumb {
+                filter: drop-shadow(0 0 1px black) drop-shadow(0 0 2px black);
+            }
+            .hue-gradient-slider .q-slider__thumb-shape {
+                fill: white !important;
+                stroke: #222 !important;
+                stroke-width: 1px;
+            }
+            .preview-dimension-input {
+                width: 72px;
+                flex: 0 0 72px;
+            }
+            .preview-dimension-input .q-field__control,
+            .preview-dimension-input .q-field__native,
+            .preview-dimension-input .q-field__marginal {
+                min-height: 26px !important;
+                height: 26px !important;
+            }
+            .preview-dimension-input .q-field__control {
+                padding: 0 5px !important;
+            }
+            .preview-dimension-input .q-field__native {
+                padding: 0 !important;
+                color: white !important;
+                text-align: right;
+                font-size: 12px;
+            }
             .layout-column { flex: 1 1 0; min-width: 280px; }
             .simulation-column { flex: 2 1 0; min-width: 460px; }
             """
@@ -291,30 +356,7 @@ class MainView:
         self.upload_status = upload_status
         self.upload_status.set_visibility(False)
 
-        with ui.expansion("Helligkeit und Kontrast", icon="contrast").classes(
-            "w-full"
-        ):
-            ui.label("Helligkeit").classes("text-sm")
-            ui.slider(
-                min=0.25,
-                max=2.0,
-                step=0.01,
-                value=self.project.settings.brightness,
-                on_change=lambda event: self._change_input_tone(
-                    "brightness", event.value
-                ),
-            ).props("label-always")
-
-            ui.label("Kontrast").classes("text-sm")
-            ui.slider(
-                min=0.25,
-                max=2.0,
-                step=0.01,
-                value=self.project.settings.contrast,
-                on_change=lambda event: self._change_input_tone(
-                    "contrast", event.value
-                ),
-            ).props("label-always")
+        self._build_effect_settings()
 
         with ui.expansion("Textur und Glättung", icon="texture").classes(
             "w-full"
@@ -363,42 +405,281 @@ class MainView:
                 ),
             ).props('aria-label="Klassenglättung"').classes("w-full")
 
-        with ui.expansion("Simulationsvorschau", icon="photo_size_select_large").classes(
-            "w-full"
+    def _build_effect_settings(self) -> None:
+        with ui.row().classes("w-full items-center"):
+            ui.label("Effekte").classes("text-xl font-semibold")
+            ui.icon("info_outline").classes(
+                "text-grey-6 text-base cursor-help shrink-0"
+            ).tooltip(
+                "Die Effekte werden von oben nach unten auf das Eingabebild "
+                "angewandt. Die Reihenfolge kann per Drag & Drop geändert werden."
+            )
+            ui.element("div").classes("grow")
+            add_button = ui.button(icon="add").props("flat dense round")
+            add_button.tooltip("Effekt hinzufügen")
+            with add_button, ui.menu():
+                ui.menu_item(
+                    EFFECT_NAMES["saturation_vibrance"],
+                    on_click=lambda: self._add_effect("saturation_vibrance"),
+                )
+                ui.menu_item(
+                    EFFECT_NAMES["brightness_contrast"],
+                    on_click=lambda: self._add_effect("brightness_contrast"),
+                )
+                ui.menu_item(
+                    EFFECT_NAMES["black_white"],
+                    on_click=lambda: self._add_effect("black_white"),
+                )
+                ui.menu_item(
+                    EFFECT_NAMES["levels"],
+                    on_click=lambda: self._add_effect("levels"),
+                )
+                ui.menu_item(
+                    EFFECT_NAMES["hue"],
+                    on_click=lambda: self._add_effect("hue"),
+                )
+
+        with ui.column().classes("w-full gap-3") as effect_cards:
+            self.effect_cards = effect_cards
+            for effect in list(self.project.effects):
+                self._build_effect_controls(effect)
+        self.effect_cards.make_sortable(
+            handle=".effect-drag-handle",
+            on_end=self._drag_effect,
+            ghost_class="opacity-40",
+        )
+        self.effect_empty_label = ui.label("Noch keine Effekte hinzugefügt.").classes(
+            "text-sm text-grey-6"
+        )
+        self._update_effect_summaries()
+
+    def _build_effect_controls(self, effect: ImageEffect) -> None:
+        histogram = None
+        card = ui.expansion().props("dense expand-separator").classes(
+            "warm-control effect-card w-full min-w-0 rounded-lg"
+        )
+        with (
+            card.add_slot("header"),
+            ui.row().classes("effect-card-header w-full items-center gap-2 no-wrap"),
         ):
-            ui.label(
-                "Breite und Höhe bleiben im Seitenverhältnis des Eingabebildes."
-            ).classes("text-xs text-grey-7")
-            with ui.row().classes("w-full gap-2"):
-                self.preview_width_input = ui.number(
-                    "Breite (px)",
-                    value=self.project.settings.preview_width,
-                    min=50,
-                    max=5000,
-                    step=1,
-                    on_change=lambda event: self._change_preview_dimension(
-                        "width", event.value
-                    ),
-                ).classes("grow")
-                self.preview_height_input = ui.number(
-                    "Höhe (px)",
-                    value=self.project.settings.preview_height,
-                    min=50,
-                    max=5000,
-                    step=1,
-                    on_change=lambda event: self._change_preview_dimension(
-                        "height", event.value
-                    ),
-                ).classes("grow")
-            self.preview_width_input.set_enabled(self.project.image is not None)
-            self.preview_height_input.set_enabled(self.project.image is not None)
+            ui.icon("drag_indicator").classes(
+                "effect-drag-handle text-grey-6 shrink-0"
+            )
+            number = ui.label().classes("font-semibold w-5 shrink-0")
+            ui.icon(self._effect_icon(effect.kind)).classes("text-grey-7 shrink-0")
+            summary = ui.label().classes("effect-card-summary text-sm grow")
+            ui.button(
+                icon="delete_outline",
+                color="negative",
+                on_click=lambda effect=effect: self._delete_effect(effect),
+            ).props("flat dense round size=sm").classes("shrink-0").tooltip(
+                "Effekt löschen"
+            )
+
+        with card:
+            if effect.kind == "saturation_vibrance":
+                self._build_effect_slider(
+                    effect,
+                    "saturation",
+                    "Sättigung",
+                    minimum=0.0,
+                    maximum=2.0,
+                )
+                self._build_effect_slider(
+                    effect,
+                    "vibrance",
+                    "Dynamik",
+                    minimum=0.0,
+                    maximum=2.0,
+                )
+            elif effect.kind == "brightness_contrast":
+                self._build_effect_slider(
+                    effect,
+                    "brightness",
+                    "Helligkeit",
+                    minimum=0.25,
+                    maximum=2.0,
+                )
+                self._build_effect_slider(
+                    effect,
+                    "contrast",
+                    "Kontrast",
+                    minimum=0.25,
+                    maximum=2.0,
+                )
+            elif effect.kind == "black_white":
+                self._build_effect_slider(
+                    effect,
+                    "amount",
+                    "Stärke",
+                    minimum=0.0,
+                    maximum=1.0,
+                )
+            elif effect.kind == "levels":
+                histogram = ui.html(
+                    self._histogram_placeholder(),
+                    sanitize=False,
+                ).classes("effect-histogram w-full px-2")
+                with ui.row().classes(
+                    "w-full justify-between text-[10px] text-grey-6 px-2 -mt-2"
+                ):
+                    ui.label("Schwarz")
+                    ui.label("Mitteltöne")
+                    ui.label("Weiß")
+                self._build_effect_slider(
+                    effect,
+                    "black_point",
+                    "Schwarzpunkt",
+                    minimum=0.0,
+                    maximum=254.0,
+                    step=1.0,
+                )
+                self._build_effect_slider(
+                    effect,
+                    "gamma",
+                    "Mitteltöne (Gamma)",
+                    minimum=0.1,
+                    maximum=3.0,
+                )
+                self._build_effect_slider(
+                    effect,
+                    "white_point",
+                    "Weißpunkt",
+                    minimum=1.0,
+                    maximum=255.0,
+                    step=1.0,
+                )
+            elif effect.kind == "hue":
+                self._build_hue_slider(effect)
+
+        self._effect_controls[id(effect)] = {
+            "card": card,
+            "number": number,
+            "summary": summary,
+            "histogram": histogram,
+        }
+
+    def _build_effect_slider(
+        self,
+        effect: ImageEffect,
+        parameter: str,
+        label: str,
+        *,
+        minimum: float,
+        maximum: float,
+        step: float = 0.01,
+    ) -> None:
+        ui.label(label).classes("text-sm px-2")
+        ui.slider(
+            min=minimum,
+            max=maximum,
+            step=step,
+            value=effect.value(parameter),
+            on_change=lambda event, effect=effect, parameter=parameter: (
+                self._change_effect_value(effect, parameter, event.value)
+            ),
+        ).props("label-always").classes("px-2")
+
+    @staticmethod
+    def _effect_icon(kind: str) -> str:
+        return {
+            "saturation_vibrance": "palette",
+            "brightness_contrast": "contrast",
+            "black_white": "filter_b_and_w",
+            "levels": "linear_scale",
+            "hue": "colorize",
+        }.get(kind, "auto_fix_high")
+
+    def _build_hue_slider(self, effect: ImageEffect) -> None:
+        slider = ui.slider(
+            min=-180.0,
+            max=180.0,
+            step=1.0,
+            value=effect.value("degrees"),
+            on_change=lambda event, effect=effect: self._change_hue_value(
+                effect, event.value, slider
+            ),
+        ).props(
+            f'label label-value="{effect.value("degrees"):+.0f}°"'
+        ).classes("hue-gradient-slider mx-2")
+        with ui.row().classes(
+            "w-full justify-between text-[10px] text-grey-6 px-2"
+        ):
+            ui.label("−180°")
+            ui.label("0°")
+            ui.label("+180°")
+
+    def _change_hue_value(
+        self,
+        effect: ImageEffect,
+        value: float | None,
+        slider: object,
+    ) -> None:
+        if value is None:
+            return
+        slider.props(f'label label-value="{float(value):+.0f}°"')
+        self._change_effect_value(effect, "degrees", value)
+
+    @staticmethod
+    def _histogram_placeholder() -> str:
+        return (
+            '<svg viewBox="0 0 256 104" preserveAspectRatio="none" '
+            'role="img" aria-label="Noch kein Histogramm verfügbar">'
+            '<rect width="256" height="104" rx="5" fill="#202124"/>'
+            '<text x="128" y="55" text-anchor="middle" fill="#9e9e9e" '
+            'font-size="11">Bild laden für Histogramm</text></svg>'
+        )
+
+    @staticmethod
+    def _histogram_svg(image: Image.Image) -> str:
+        rgb = np.asarray(image, dtype=np.uint8)
+        counts = np.stack(
+            [np.bincount(rgb[..., channel].ravel(), minlength=256) for channel in range(3)]
+        ).astype(np.float64)
+        display_counts = np.sqrt(counts)
+        maximum = max(1.0, float(display_counts.max()))
+
+        def polygon(channel: int) -> str:
+            heights = display_counts[channel] / maximum * 96.0
+            points = ["0,102"]
+            points.extend(
+                f"{index},{102.0 - height:.2f}"
+                for index, height in enumerate(heights)
+            )
+            points.append("255,102")
+            return " ".join(points)
+
+        return (
+            '<svg viewBox="0 0 256 104" preserveAspectRatio="none" '
+            'role="img" aria-label="RGB-Histogramm">'
+            '<rect width="256" height="104" rx="5" fill="#202124"/>'
+            '<path d="M64 0V104 M128 0V104 M192 0V104" '
+            'stroke="#555" stroke-width="0.5"/>'
+            f'<polygon points="{polygon(0)}" fill="#ff5252" fill-opacity=".42"/>'
+            f'<polygon points="{polygon(1)}" fill="#69f06f" fill-opacity=".42"/>'
+            f'<polygon points="{polygon(2)}" fill="#5c8dff" fill-opacity=".48"/>'
+            '<rect x=".5" y=".5" width="255" height="103" rx="5" '
+            'fill="none" stroke="#777"/></svg>'
+        )
+
+    def _refresh_effect_visualizations(self) -> None:
+        if self.project.image is None:
+            return
+        current = self.project.image.copy()
+        current.thumbnail((420, 420), Image.Resampling.LANCZOS)
+        try:
+            for effect in self.project.effects:
+                controls = self._effect_controls.get(id(effect))
+                if controls is not None and controls.get("histogram") is not None:
+                    controls["histogram"].set_content(self._histogram_svg(current))
+                adjusted = apply_effect(current, effect)
+                current.close()
+                current = adjusted
+        finally:
+            current.close()
 
     def _build_ink_settings(self) -> None:
-        with ui.row().classes("w-full items-center"):
-            ui.label("Druckfarben").classes("text-xl font-semibold grow")
-            ui.button(icon="add", on_click=self._add_ink).props(
-                "flat dense round"
-            ).tooltip("Druckfarbe hinzufügen")
+        ui.label("Farben").classes("text-xl font-semibold")
 
         paper_card = ui.expansion().props("dense expand-separator").classes(
             "warm-control w-full rounded-lg"
@@ -472,9 +753,18 @@ class MainView:
             self.paper_lab_group = paper_lab_group
         self._sync_paper_controls()
 
-        ui.label(
-            "Die Reihenfolge der Druckfarben kann per Drag & Drop geändert werden."
-        ).classes("text-xs text-grey-7")
+        with ui.row().classes("w-full items-center"):
+            ui.label("Druckfarben").classes("text-lg font-semibold")
+            ui.icon("info_outline").classes(
+                "text-grey-6 text-base cursor-help shrink-0"
+            ).tooltip(
+                "Die Reihenfolge der Druckfarben kann per Drag & Drop geändert "
+                "werden und bestimmt die Druckreihenfolge."
+            )
+            ui.element("div").classes("grow")
+            ui.button(icon="add", on_click=self._add_ink).props(
+                "flat dense round"
+            ).tooltip("Druckfarbe hinzufügen")
 
         with ui.column().classes("w-full gap-3") as ink_cards:
             self.ink_cards = ink_cards
@@ -848,8 +1138,37 @@ class MainView:
             "preview-image rounded-lg self-center"
         ).style("width: 100%; max-width: 100%")
         self.preview.set_visibility(False)
-        self.preview_size = ui.label("Vorschaugröße: –").classes("text-sm text-grey-4")
-        self.preview_size.set_visibility(False)
+        with ui.row().classes("w-full h-8 items-center gap-1 no-wrap"):
+            ui.label("Vorschau:").classes("text-xs text-grey-4 shrink-0")
+            self.preview_width_input = ui.number(
+                value=self.project.settings.preview_width,
+                min=50,
+                max=5000,
+                step=1,
+                on_change=lambda event: self._change_preview_dimension(
+                    "width", event.value
+                ),
+            ).props(
+                'dense outlined hide-bottom-space aria-label="Vorschau-Breite in Pixeln"'
+            ).classes("preview-dimension-input")
+            ui.label("×").classes("text-xs text-grey-4 shrink-0")
+            self.preview_height_input = ui.number(
+                value=self.project.settings.preview_height,
+                min=50,
+                max=5000,
+                step=1,
+                on_change=lambda event: self._change_preview_dimension(
+                    "height", event.value
+                ),
+            ).props(
+                'dense outlined hide-bottom-space aria-label="Vorschau-Höhe in Pixeln"'
+            ).classes("preview-dimension-input")
+            ui.label("px").classes("text-xs text-grey-4 shrink-0")
+            self.preview_size = ui.label(
+                "· Seitenverhältnis bleibt erhalten"
+            ).classes("text-xs text-grey-4 grow truncate ml-1")
+        self.preview_width_input.set_enabled(self.project.image is not None)
+        self.preview_height_input.set_enabled(self.project.image is not None)
 
         self.palette_row = ui.row().classes("w-full gap-2 flex-wrap")
 
@@ -1345,12 +1664,91 @@ class MainView:
             max(1, round(settings.print_height_cm / 2.54 * settings.dpi)),
         )
 
-    def _change_input_tone(self, name: str, value: float | None) -> None:
-        if value is None:
+    def _change_effect_value(
+        self,
+        effect: ImageEffect,
+        parameter: str,
+        value: float | None,
+    ) -> None:
+        if value is None or effect not in self.project.effects:
             return
-        setattr(self.project.settings, name, float(value))
+        effect.parameters[parameter] = float(value)
+        if effect.kind == "levels":
+            black_point = effect.value("black_point")
+            white_point = effect.value("white_point")
+            if parameter == "black_point" and black_point >= white_point:
+                effect.parameters["black_point"] = white_point - 1.0
+            elif parameter == "white_point" and white_point <= black_point:
+                effect.parameters["white_point"] = black_point + 1.0
+        self._update_effect_summaries()
         self._refresh_input_preview()
         self.schedule_preview()
+
+    def _add_effect(self, kind: str) -> None:
+        effect = ImageEffect.create(kind)
+        self.project.effects.append(effect)
+        with self.effect_cards:
+            self._build_effect_controls(effect)
+        self._update_effect_summaries()
+        self._refresh_input_preview()
+        self.schedule_preview()
+
+    def _delete_effect(self, effect: ImageEffect) -> None:
+        if effect not in self.project.effects:
+            return
+        self.project.effects.remove(effect)
+        controls = self._effect_controls.pop(id(effect))
+        controls["card"].delete()
+        self._update_effect_summaries()
+        self._refresh_input_preview()
+        self.schedule_preview()
+
+    def _drag_effect(self, event: events.SortableEventArguments) -> None:
+        if event.old_index == event.new_index:
+            return
+        effect = self.project.effects.pop(event.old_index)
+        self.project.effects.insert(event.new_index, effect)
+        self._update_effect_summaries()
+        self._refresh_input_preview()
+        self.schedule_preview()
+
+    def _update_effect_summaries(self) -> None:
+        if not hasattr(self, "effect_empty_label"):
+            return
+        self.effect_empty_label.set_visibility(not self.project.effects)
+        for index, effect in enumerate(self.project.effects, start=1):
+            controls = self._effect_controls.get(id(effect))
+            if controls is None:
+                continue
+            controls["number"].set_text(str(index))
+            if effect.kind == "saturation_vibrance":
+                summary = (
+                    f"{EFFECT_NAMES[effect.kind]} · "
+                    f"{effect.value('saturation'):.2f} / "
+                    f"{effect.value('vibrance'):.2f}"
+                )
+            elif effect.kind == "brightness_contrast":
+                summary = (
+                    f"{EFFECT_NAMES[effect.kind]} · "
+                    f"{effect.value('brightness'):.2f} / "
+                    f"{effect.value('contrast'):.2f}"
+                )
+            elif effect.kind == "black_white":
+                summary = (
+                    f"{EFFECT_NAMES[effect.kind]} · "
+                    f"{round(effect.value('amount') * 100)} %"
+                )
+            elif effect.kind == "levels":
+                summary = (
+                    f"{EFFECT_NAMES[effect.kind]} · "
+                    f"{effect.value('black_point'):.0f} / "
+                    f"{effect.value('gamma'):.2f} / "
+                    f"{effect.value('white_point'):.0f}"
+                )
+            else:
+                degrees = effect.value("degrees")
+                summary = f"{EFFECT_NAMES[effect.kind]} · {degrees:+.0f}°"
+            controls["summary"].set_text(summary)
 
     def _change_preview_dimension(
         self,
@@ -1385,13 +1783,14 @@ class MainView:
         preview = self.project.image.copy()
         try:
             preview.thumbnail((800, 800), Image.Resampling.LANCZOS)
-            adjusted = adjust_input_image(preview, self.project.settings)
+            adjusted = apply_effects(preview, self.project.effects)
             try:
                 _set_pil_source(self.input_preview, adjusted)
             finally:
                 adjusted.close()
         finally:
             preview.close()
+        self._refresh_effect_visualizations()
 
     def _change_paper_selection(
         self,
@@ -2083,6 +2482,7 @@ class MainView:
                 deepcopy(self.project.settings),
                 deepcopy(self.project.inks),
                 deepcopy(self._active_measured_overprints()),
+                deepcopy(self.project.effects),
             )
             if result is None:
                 return
@@ -2374,8 +2774,7 @@ class MainView:
             suffix = f" · Exportbereich: {crop_width} × {crop_height} px"
         else:
             suffix = " · vollständiges Bild mit Rand"
-        self.preview_size.set_text(f"Vorschaugröße: {width} × {height} px{suffix}")
-        self.preview_size.set_visibility(True)
+        self.preview_size.set_text(suffix)
 
     def _show_result(self, result: SeparationResult) -> None:
         previous_base = self._base_preview_simulation
@@ -2447,6 +2846,7 @@ class MainView:
                 deepcopy(self.project.settings),
                 deepcopy(self.project.inks),
                 deepcopy(self._active_measured_overprints()),
+                deepcopy(self.project.effects),
             )
             if archive is not None:
                 ui.download(archive, filename="screenprint_export.zip")

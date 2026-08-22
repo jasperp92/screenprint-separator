@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from screenprint_separator.models.effect import EFFECT_DEFAULTS, ImageEffect
 from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.project import Project
 from screenprint_separator.models.settings import Settings
@@ -41,7 +42,33 @@ class SessionStore:
             if not 1 <= len(inks) <= 5:
                 inks = fallback.inks
 
-            project = Project(settings=settings, inks=inks)
+            effects = []
+            stored_effects = data.get("effects")
+            if isinstance(stored_effects, list):
+                for values in stored_effects:
+                    if not isinstance(values, dict):
+                        continue
+                    kind = values.get("kind")
+                    parameters = values.get("parameters", {})
+                    if kind not in EFFECT_DEFAULTS or not isinstance(parameters, dict):
+                        continue
+                    normalized = {
+                        name: float(parameters.get(name, default))
+                        for name, default in EFFECT_DEFAULTS[kind].items()
+                    }
+                    effects.append(ImageEffect(kind=kind, parameters=normalized))
+            elif settings.brightness != 1.0 or settings.contrast != 1.0:
+                effects.append(
+                    ImageEffect(
+                        kind="brightness_contrast",
+                        parameters={
+                            "brightness": settings.brightness,
+                            "contrast": settings.contrast,
+                        },
+                    )
+                )
+
+            project = Project(settings=settings, inks=inks, effects=effects)
             project.measured_overprints = {
                 int(state): tuple(values)
                 for state, values in data.get("measured_overprints", {}).items()
@@ -72,6 +99,7 @@ class SessionStore:
             "filename": filename,
             "settings": asdict(project.settings),
             "inks": [asdict(ink) for ink in project.inks],
+            "effects": [asdict(effect) for effect in project.effects],
             "measured_overprints": project.measured_overprints,
             "manual_overprint_states": sorted(project.manual_overprint_states),
             "overprint_sources": project.overprint_sources,

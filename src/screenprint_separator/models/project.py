@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from PIL import Image
 
+from screenprint_separator.models.effect import ImageEffect
 from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.settings import Settings
 
@@ -11,6 +12,7 @@ from screenprint_separator.models.settings import Settings
 class Project:
     settings: Settings
     inks: list[Ink] = field(default_factory=list)
+    effects: list[ImageEffect] = field(default_factory=list)
 
     image: Image.Image | None = None
     preview_image: Image.Image | None = None

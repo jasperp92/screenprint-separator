@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageFilter
 
+from screenprint_separator.models.effect import ImageEffect
 from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.settings import Settings
 from screenprint_separator.processing.color_classifier import ColorClassifier
 from screenprint_separator.processing.color_converter import ColorConverter
+from screenprint_separator.processing.effects import apply_effects
 from screenprint_separator.processing.palette import (
     OverprintPalette,
     build_overprint_palette,
@@ -22,15 +24,6 @@ class SeparationResult:
     class_indices: np.ndarray
     channels: dict[str, np.ndarray]
     palette: OverprintPalette
-
-
-def adjust_input_image(image: Image.Image, settings: Settings) -> Image.Image:
-    """Apply the non-destructive input tone controls."""
-    adjusted = ImageEnhance.Brightness(image).enhance(settings.brightness)
-    try:
-        return ImageEnhance.Contrast(adjusted).enhance(settings.contrast)
-    finally:
-        adjusted.close()
 
 
 def smooth_texture(image: Image.Image, settings: Settings) -> Image.Image:
@@ -70,6 +63,7 @@ def process_image(
     settings: Settings,
     inks: list[Ink],
     measured_lab: dict[int, tuple[float, float, float]] | None = None,
+    effects: list[ImageEffect] | None = None,
     *,
     preview: bool = True,
 ) -> SeparationResult:
@@ -81,8 +75,12 @@ def process_image(
         if preview
         else image.copy()
     )
-    working = adjust_input_image(working, settings)
-    working = smooth_texture(working, settings)
+    adjusted = apply_effects(working, effects or [])
+    working.close()
+    working = adjusted
+    smoothed = smooth_texture(working, settings)
+    working.close()
+    working = smoothed
     rgb = np.asarray(working, dtype=np.uint8)
     palette = build_overprint_palette(inks, settings.paper, measured_lab)
     classifier = ColorClassifier(palette, [ink.bias for ink in inks])
