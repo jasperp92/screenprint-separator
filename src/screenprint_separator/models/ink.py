@@ -12,3 +12,4 @@ class Ink:
     library_id: str = ""
     opacity: float = 0.72
     bias: float = 0.0
+    screen_angle: float = 45.0

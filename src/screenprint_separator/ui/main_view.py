@@ -30,6 +30,7 @@ from screenprint_separator.processing.framing import (
     normalize_crop_box,
     resize_crop_box,
 )
+from screenprint_separator.processing.halftone import HALFTONE_SHAPES
 from screenprint_separator.processing.image_loader import ImageLoader
 from screenprint_separator.processing.palette import (
     OverprintPalette,
@@ -41,6 +42,8 @@ from screenprint_separator.processing.pipeline import (
     process_image,
 )
 from screenprint_separator.processing.simulation import Simulation
+
+DEFAULT_SCREEN_ANGLES = (15.0, 75.0, 45.0, 0.0, 30.0)
 
 
 def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
@@ -121,6 +124,8 @@ class MainView:
                 _ink_from_cmyk("Farbe 3", (22.0, 16.0, 0.0, 0.0)),
             ]
         )
+        for index, ink in enumerate(default_inks):
+            ink.screen_angle = DEFAULT_SCREEN_ANGLES[index]
         fallback_project = Project(
             settings=settings,
             inks=default_inks,
@@ -301,28 +306,93 @@ class MainView:
             }
             .layout-column { flex: 1 1 0; min-width: 280px; }
             .simulation-column { flex: 2 1 0; min-width: 460px; }
+            .panel-sticky-header { padding-top: 1rem; }
+            @media (min-width: 1280px) {
+                html,
+                body,
+                #q-app,
+                .nicegui-layout,
+                .q-page-container,
+                .q-page,
+                .nicegui-content {
+                    height: 100dvh;
+                    max-height: 100dvh;
+                    min-height: 0 !important;
+                    overflow: hidden;
+                }
+                .nicegui-content {
+                    padding: 0 !important;
+                    gap: 0 !important;
+                }
+                .desktop-app-shell {
+                    height: 100dvh;
+                    max-height: 100dvh;
+                    overflow: hidden;
+                }
+                .desktop-panel-row {
+                    flex: 1 1 0;
+                    min-height: 0;
+                    overflow: hidden;
+                }
+                .desktop-scroll-panel {
+                    height: 100%;
+                    max-height: 100%;
+                    min-height: 0;
+                    overflow-y: auto;
+                    overscroll-behavior: contain;
+                    scrollbar-gutter: stable;
+                    scrollbar-width: thin;
+                }
+                .desktop-scroll-panel::-webkit-scrollbar { width: 8px; }
+                .desktop-scroll-panel::-webkit-scrollbar-thumb {
+                    background: rgba(120, 110, 95, .45);
+                    border-radius: 999px;
+                }
+                .panel-sticky-header {
+                    position: sticky;
+                    top: 0;
+                    z-index: 20;
+                    flex: 0 0 auto;
+                    padding-bottom: .75rem;
+                }
+                .settings-card .panel-sticky-header {
+                    background: white;
+                    border-bottom: 1px solid #ece7de;
+                }
+                .preview-card .panel-sticky-header {
+                    background: #252525;
+                    border-bottom: 1px solid #444;
+                }
+            }
             """
         )
 
-        with ui.column().classes("w-full max-w-[1900px] mx-auto p-4 gap-4"):
+        with ui.column().classes(
+            "desktop-app-shell w-full max-w-[1900px] mx-auto p-4 gap-4"
+        ):
             ui.label("Screenprint Separator").classes("text-3xl font-bold")
             ui.label(
                 "Eine bis fünf Druckfarben · automatische Überdruckzustände"
             ).classes("text-grey-7")
 
-            with ui.row().classes("w-full items-start gap-4 flex-wrap xl:flex-nowrap"):
+            with ui.row().classes(
+                "desktop-panel-row w-full items-start gap-4 flex-wrap xl:flex-nowrap"
+            ):
                 with ui.column().classes(
-                    "settings-card layout-column rounded-xl p-4 gap-4 w-full"
+                    "settings-card layout-column desktop-scroll-panel "
+                    "rounded-xl px-4 pb-4 pt-0 gap-4 w-full"
                 ):
                     self._build_input_output_settings()
 
                 with ui.column().classes(
-                    "settings-card layout-column rounded-xl p-4 gap-4 w-full"
+                    "settings-card layout-column desktop-scroll-panel "
+                    "rounded-xl px-4 pb-4 pt-0 gap-4 w-full"
                 ):
                     self._build_ink_settings()
 
                 with ui.column().classes(
-                    "preview-card simulation-column rounded-xl p-4 gap-3 w-full"
+                    "preview-card simulation-column desktop-scroll-panel "
+                    "rounded-xl px-4 pb-4 pt-0 gap-3 w-full"
                 ):
                     self._build_preview()
 
@@ -335,7 +405,9 @@ class MainView:
         self._restore_cached_image()
 
     def _build_input_output_settings(self) -> None:
-        ui.label("Eingabe").classes("text-xl font-semibold")
+        ui.label("Eingabe & Einstellungen").classes(
+            "panel-sticky-header text-xl font-semibold w-full"
+        )
         self.upload = ui.upload(
             label="Bild laden",
             on_upload=self.load_image,
@@ -357,6 +429,7 @@ class MainView:
         self.upload_status.set_visibility(False)
 
         self._build_effect_settings()
+        ui.label("Einstellungen").classes("text-xl font-semibold")
 
         with ui.expansion("Textur und Glättung", icon="texture").classes(
             "w-full"
@@ -404,6 +477,128 @@ class MainView:
                     "class_smooth_size", event.value, int
                 ),
             ).props('aria-label="Klassenglättung"').classes("w-full")
+
+        self._build_halftone_settings()
+        self._build_trapping_settings()
+
+    def _build_halftone_settings(self) -> None:
+        with ui.expansion("Rasterung", icon="grain").classes("w-full"):
+            self.halftone_mode = ui.toggle(
+                {"solid": "Vollton", "halftone": "AM-Raster"},
+                value=self.project.settings.halftone_mode,
+                on_change=self._change_halftone_mode,
+            ).props("spread no-caps").classes("w-full")
+            with ui.column().classes("w-full gap-3") as halftone_parameters:
+                self._build_info_label(
+                    "AM-Raster für Verläufe",
+                    "Kontinuierliche Flächendeckungen werden in regelmäßig "
+                    "angeordnete Rasterpunkte umgesetzt. Beim Export wird direkt "
+                    "in der finalen Ausgabeauflösung gerastert.",
+                )
+                with ui.row().classes("w-full gap-2"):
+                    ui.number(
+                        "Rasterweite",
+                        value=self.project.settings.halftone_frequency_lpi,
+                        min=5,
+                        max=150,
+                        step=1,
+                        suffix="lpi",
+                        on_change=lambda event: self._change_setting(
+                            "halftone_frequency_lpi", event.value
+                        ),
+                    ).props("debounce=300").classes("grow")
+                    ui.select(
+                        HALFTONE_SHAPES,
+                        label="Punktform",
+                        value=self.project.settings.halftone_shape,
+                        on_change=lambda event: self._change_setting(
+                            "halftone_shape", event.value, str
+                        ),
+                    ).classes("grow")
+                self._build_info_label(
+                    "Verlaufsweichheit",
+                    "Steuert die distanzgewichtete Interpolation zwischen den "
+                    "nächstliegenden Vollton- und Überdruckzuständen. Kleine Werte "
+                    "bleiben näher an der bisherigen harten Farbzuordnung.",
+                )
+                ui.slider(
+                    min=0.5,
+                    max=15.0,
+                    step=0.5,
+                    value=self.project.settings.halftone_softness,
+                    on_change=lambda event: self._change_setting(
+                        "halftone_softness", event.value
+                    ),
+                ).props("label-always")
+                self._build_info_label(
+                    "Tonwert / Punktzuwachs",
+                    "Werte über 1 vergrößern die Rasterpunkte in den Mitteltönen. "
+                    "Minimal- und Maximalpunkt begrenzen nicht stabil druckbare "
+                    "Punkte beziehungsweise offene Flächen.",
+                )
+                ui.slider(
+                    min=0.5,
+                    max=2.0,
+                    step=0.05,
+                    value=self.project.settings.halftone_gamma,
+                    on_change=lambda event: self._change_setting(
+                        "halftone_gamma", event.value
+                    ),
+                ).props('label-always label prefix="γ "')
+                with ui.row().classes("w-full gap-2"):
+                    ui.number(
+                        "Minimalpunkt",
+                        value=self.project.settings.halftone_min_dot * 100,
+                        min=0,
+                        max=49,
+                        step=0.5,
+                        suffix="%",
+                        on_change=lambda event: self._change_halftone_limit(
+                            "halftone_min_dot", event.value
+                        ),
+                    ).props("debounce=300").classes("grow")
+                    ui.number(
+                        "Maximalpunkt",
+                        value=self.project.settings.halftone_max_dot * 100,
+                        min=51,
+                        max=100,
+                        step=0.5,
+                        suffix="%",
+                        on_change=lambda event: self._change_halftone_limit(
+                            "halftone_max_dot", event.value
+                        ),
+                    ).props("debounce=300").classes("grow")
+                ui.label(
+                    "Trapping ist im Rastermodus deaktiviert, weil eine "
+                    "Maskenerweiterung wie unkontrollierter Punktzuwachs wirken würde."
+                ).classes("text-xs text-grey-6")
+            self.halftone_parameters = halftone_parameters
+            halftone_parameters.set_visibility(
+                self.project.settings.halftone_mode == "halftone"
+            )
+
+    def _build_trapping_settings(self) -> None:
+        with ui.expansion("Trapping", icon="compare_arrows").classes("w-full"):
+            self._build_info_label(
+                "Überfüllung der Farbauszüge",
+                "Verbreitert jeden Farbauszug in der finalen Ausgabeauflösung um "
+                "das gewählte physische Maß. So überlappen benachbarte Farben leicht "
+                "und kleine Passerungenauigkeiten erzeugen keine weißen Blitzer. "
+                "0 mm deaktiviert das Trapping. Meist reichen 0,05 bis 0,3 mm; "
+                "hohe Werte können Zwischenräume schließen und Details verbinden. "
+                "Die Auswirkung wird direkt in der Simulationsvorschau angenähert.",
+            )
+            self.trapping_input = ui.input(
+                value=str(self.project.settings.trapping_mm).replace(".", ","),
+                on_change=lambda event: self._change_export_setting(
+                    "trapping_mm", event.value, float
+                ),
+            ).props(
+                'inputmode=decimal aria-label="Trapping" suffix="mm" debounce=300'
+            ).classes("w-full")
+            self.trapping_input.set_enabled(
+                self.project.settings.halftone_mode != "halftone"
+            )
 
     def _build_effect_settings(self) -> None:
         with ui.row().classes("w-full items-center"):
@@ -679,7 +874,9 @@ class MainView:
             current.close()
 
     def _build_ink_settings(self) -> None:
-        ui.label("Farben").classes("text-xl font-semibold")
+        ui.label("Farben").classes(
+            "panel-sticky-header text-xl font-semibold w-full"
+        )
 
         paper_card = ui.expansion().props("dense expand-separator").classes(
             "warm-control w-full rounded-lg"
@@ -931,6 +1128,24 @@ class MainView:
                     ink, "bias", event.value
                 ),
             ).props("label-always").classes("px-2")
+            with ui.column().classes("w-full gap-1 px-2") as halftone_group:
+                self._build_info_label(
+                    "Rasterwinkel",
+                    "Dreht das Raster dieser Druckfarbe. Unterschiedliche Winkel "
+                    "reduzieren auffällige Überlagerungsmuster; das Ergebnis sollte "
+                    "für das konkrete Gewebe und Motiv geprüft werden.",
+                )
+                ui.input(
+                    "Winkel (°)",
+                    value=f"{ink.screen_angle:g}".replace(".", ","),
+                    on_change=lambda event, ink=ink: self._change_ink_screen_angle(
+                        ink, event.value
+                    ),
+                ).props(
+                    'inputmode=decimal suffix="°" debounce=300'
+                ).classes("w-full")
+            self._ink_controls[id(ink)]["halftone_group"] = halftone_group
+            self._sync_ink_control_visibility(ink)
         self._update_ink_summary(ink)
 
     def _build_overprint_controls(self) -> None:
@@ -1121,7 +1336,7 @@ class MainView:
         self.schedule_preview()
 
     def _build_preview(self) -> None:
-        with ui.row().classes("w-full items-center"):
+        with ui.row().classes("panel-sticky-header w-full items-center"):
             ui.label("Simulation und Ausgabe").classes("text-xl font-semibold grow")
             with ui.element("div").classes(
                 "w-5 h-5 shrink-0 flex items-center justify-center"
@@ -1270,28 +1485,6 @@ class MainView:
             self.crop_reset_button.set_visibility(
                 self.project.settings.resize_mode != "pad"
             )
-        with ui.expansion("Trapping", icon="compare_arrows").classes(
-            "export-settings w-full text-white"
-        ):
-            self._build_info_label(
-                "Überfüllung der Farbauszüge",
-                "Verbreitert jeden Farbauszug in der finalen Ausgabeauflösung um "
-                "das gewählte physische Maß. So überlappen benachbarte Farben leicht "
-                "und kleine Passerungenauigkeiten erzeugen keine weißen Blitzer. "
-                "0 mm deaktiviert das Trapping. Meist reichen 0,05 bis 0,3 mm; "
-                "hohe Werte können Zwischenräume schließen und Details verbinden. "
-                "Die Auswirkung wird direkt in der Simulationsvorschau angenähert.",
-            )
-            self.trapping_input = ui.input(
-                value=str(self.project.settings.trapping_mm),
-                on_change=lambda event: self._change_export_setting(
-                    "trapping_mm", event.value, float
-                ),
-            ).props(
-                'type=number inputmode=decimal min=0 max=2 step=0.05 '
-                'aria-label="Trapping" suffix="mm" debounce=300'
-            ).classes("w-full")
-
         self.export_size_label = ui.label().classes("text-sm text-white")
         self._update_export_size_label()
 
@@ -1315,6 +1508,31 @@ class MainView:
         self._save_session()
         if refresh:
             self.schedule_preview()
+
+    def _change_halftone_mode(
+        self, event: events.ValueChangeEventArguments
+    ) -> None:
+        if event.value not in {"solid", "halftone"}:
+            return
+        self.project.settings.halftone_mode = event.value
+        self.halftone_parameters.set_visibility(event.value == "halftone")
+        self.trapping_input.set_enabled(event.value != "halftone")
+        for ink in self.project.inks:
+            self._sync_ink_control_visibility(ink)
+        self._update_export_size_label()
+        self._save_session()
+        self.schedule_preview()
+
+    def _change_halftone_limit(self, name: str, percent: float | None) -> None:
+        if percent is None:
+            return
+        setattr(
+            self.project.settings,
+            name,
+            float(np.clip(float(percent) / 100.0, 0.0, 1.0)),
+        )
+        self._save_session()
+        self.schedule_preview()
 
     def _change_export_setting(
         self,
@@ -1641,19 +1859,28 @@ class MainView:
         work_width, work_height = self._export_work_size()
         output_width = round(settings.print_width_cm / 2.54 * settings.output_dpi)
         output_height = round(settings.print_height_cm / 2.54 * settings.output_dpi)
-        trapping_pixels = round(settings.trapping_mm / 25.4 * settings.output_dpi)
+        trapping_pixels = (
+            0
+            if settings.halftone_mode == "halftone"
+            else round(settings.trapping_mm / 25.4 * settings.output_dpi)
+        )
         scale_factor = settings.output_dpi / settings.dpi
         scale_text = f"{scale_factor:.1f}".replace(".", ",")
         warnings = []
         if scale_factor > 2.0:
             warnings.append("starke Hochskalierung")
-        if settings.trapping_mm > 0.5:
+        if settings.halftone_mode != "halftone" and settings.trapping_mm > 0.5:
             warnings.append("Trapping sehr hoch")
         warning_text = f" · ⚠ {' / '.join(warnings)}" if warnings else ""
+        output_mode = (
+            f"AM-Raster: {settings.halftone_frequency_lpi:g} lpi"
+            if settings.halftone_mode == "halftone"
+            else f"Trapping: {trapping_pixels} px"
+        )
         self.export_size_label.set_text(
             f"Berechnung ({settings.dpi} DPI): {work_width} × {work_height} px · "
             f"TIFF ({settings.output_dpi} DPI): {output_width} × {output_height} px · "
-            f"Skalierung: {scale_text}× · Trapping: {trapping_pixels} px"
+            f"Skalierung: {scale_text}× · {output_mode}"
             f"{warning_text}"
         )
 
@@ -1985,6 +2212,11 @@ class MainView:
         controls["palette"].set_visibility(not show_cmyk)
         if show_cmyk:
             controls["palette"].run_method("hidePopup")
+        halftone_group = controls.get("halftone_group")
+        if halftone_group is not None:
+            halftone_group.set_visibility(
+                self.project.settings.halftone_mode == "halftone"
+            )
 
     def _update_ink_summary(self, ink: Ink) -> None:
         controls = self._ink_controls[id(ink)]
@@ -2181,6 +2413,16 @@ class MainView:
             self._sync_automatic_mixture_controls()
         self.schedule_preview()
 
+    def _change_ink_screen_angle(self, ink: Ink, value: str | None) -> None:
+        if value is None:
+            return
+        try:
+            angle = float(str(value).strip().replace(",", "."))
+        except ValueError:
+            return
+        ink.screen_angle = round(float(np.clip(angle, 0.0, 179.5)) * 2.0) / 2.0
+        self.schedule_preview()
+
     def _capture_overprints_by_inks(self) -> dict[frozenset[int], dict[str, object]]:
         palette = self._automatic_palette()
         captured = {}
@@ -2244,6 +2486,7 @@ class MainView:
             f"Farbe {len(self.project.inks) + 1}",
             (0.0, 0.0, 0.0, 100.0),
         )
+        ink.screen_angle = DEFAULT_SCREEN_ANGLES[len(self.project.inks)]
         self.project.inks.append(ink)
         with self.ink_cards:
             self._build_ink_controls(ink)
@@ -2534,7 +2777,11 @@ class MainView:
     def _preview_trapping_radius(self) -> float:
         indices = self.project.class_indices
         trapping_mm = self.project.settings.trapping_mm
-        if indices is None or trapping_mm <= 0:
+        if (
+            indices is None
+            or trapping_mm <= 0
+            or self.project.settings.halftone_mode == "halftone"
+        ):
             return 0.0
 
         image_height, image_width = indices.shape

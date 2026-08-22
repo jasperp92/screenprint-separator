@@ -16,6 +16,13 @@ from screenprint_separator.processing.color_classifier import ColorClassifier
 from screenprint_separator.processing.color_converter import ColorConverter
 from screenprint_separator.processing.effects import apply_effects
 from screenprint_separator.processing.framing import crop_box_pixels
+from screenprint_separator.processing.halftone import (
+    apply_tone_curve,
+    rasterize_coverage,
+    rasterize_coverages,
+    smooth_coverages,
+    state_indices_from_masks,
+)
 from screenprint_separator.processing.palette import build_overprint_palette
 from screenprint_separator.processing.pipeline import smooth_classes, smooth_texture
 from screenprint_separator.processing.simulation import Simulation
@@ -42,6 +49,8 @@ def _output_size(settings: Settings) -> tuple[int, int]:
 
 def _trapping_pixels(settings: Settings) -> int:
     """Convert the physical trap width to pixels at final plate resolution."""
+    if settings.halftone_mode == "halftone":
+        return 0
     return max(0, round(settings.trapping_mm / 25.4 * settings.output_dpi))
 
 
@@ -99,6 +108,101 @@ def _classify_tiled(
                 inner_x0:inner_x1,
             ]
 
+    labels.flush()
+    return labels
+
+
+def _coverage_tiled(
+    image: Image.Image,
+    classifier: ColorClassifier,
+    settings: Settings,
+    path: Path,
+    ink_count: int,
+) -> np.memmap:
+    """Calculate continuous ink coverages without keeping the full image in RAM."""
+    width, height = image.size
+    coverages = np.memmap(
+        path,
+        dtype=np.uint8,
+        mode="w+",
+        shape=(height, width, ink_count),
+    )
+    blur_padding = int(np.ceil(settings.texture_blur_radius * 3.0))
+    coverage_padding = int(np.ceil(settings.class_smooth_size * 1.5))
+    padding = max(blur_padding, coverage_padding)
+
+    for y0 in range(0, height, settings.tile_size):
+        y1 = min(y0 + settings.tile_size, height)
+        for x0 in range(0, width, settings.tile_size):
+            x1 = min(x0 + settings.tile_size, width)
+            crop_x0 = max(0, x0 - padding)
+            crop_y0 = max(0, y0 - padding)
+            crop_x1 = min(width, x1 + padding)
+            crop_y1 = min(height, y1 + padding)
+
+            source = image.crop((crop_x0, crop_y0, crop_x1, crop_y1))
+            try:
+                tile = smooth_texture(source, settings)
+            finally:
+                source.close()
+            try:
+                tile_rgb = np.asarray(tile, dtype=np.uint8)
+                tile_coverages = classifier.coverage_rgb_lut(
+                    tile_rgb,
+                    settings.halftone_softness,
+                )
+            finally:
+                tile.close()
+            tile_coverages = smooth_coverages(
+                tile_coverages, settings.class_smooth_size
+            )
+            tile_coverages = apply_tone_curve(
+                tile_coverages,
+                settings.halftone_gamma,
+                settings.halftone_min_dot,
+                settings.halftone_max_dot,
+            )
+
+            inner_x0 = x0 - crop_x0
+            inner_y0 = y0 - crop_y0
+            inner_x1 = inner_x0 + x1 - x0
+            inner_y1 = inner_y0 + y1 - y0
+            inner = tile_coverages[inner_y0:inner_y1, inner_x0:inner_x1]
+            coverages[y0:y1, x0:x1] = np.rint(inner * 255).astype(np.uint8)
+
+    coverages.flush()
+    return coverages
+
+
+def _rasterize_working_coverages(
+    coverages: np.memmap,
+    palette_masks: np.ndarray,
+    settings: Settings,
+    inks: list[Ink],
+    path: Path,
+) -> np.memmap:
+    height, width = coverages.shape[:2]
+    labels = np.memmap(path, dtype=np.uint8, mode="w+", shape=(height, width))
+    angles = [ink.screen_angle for ink in inks]
+    for y0 in range(0, height, settings.tile_size):
+        y1 = min(y0 + settings.tile_size, height)
+        for x0 in range(0, width, settings.tile_size):
+            x1 = min(x0 + settings.tile_size, width)
+            tile = (
+                np.asarray(coverages[y0:y1, x0:x1], dtype=np.float32) / 255.0
+            )
+            masks = rasterize_coverages(
+                tile,
+                dpi=settings.dpi,
+                frequency_lpi=settings.halftone_frequency_lpi,
+                angles=angles,
+                shape=settings.halftone_shape,
+                x_offset=x0,
+                y_offset=y0,
+            )
+            labels[y0:y1, x0:x1] = state_indices_from_masks(
+                masks, palette_masks
+            )
     labels.flush()
     return labels
 
@@ -192,6 +296,73 @@ def _render_plate(
     return plate
 
 
+def _render_halftone_plate(
+    coverage_image: Image.Image,
+    output_size: tuple[int, int],
+    settings: Settings,
+    angle: float,
+) -> Image.Image:
+    """Rasterize continuous coverage at final output resolution."""
+    output_width, output_height = output_size
+    source_width, source_height = coverage_image.size
+    plate = Image.new("1", output_size, color=1)
+    resize_scale = max(
+        output_width / source_width,
+        output_height / source_height,
+        1.0,
+    )
+    padding = int(np.ceil(3.0 * resize_scale))
+    tile_size = max(512, settings.tile_size * 2)
+
+    for y0 in range(0, output_height, tile_size):
+        y1 = min(y0 + tile_size, output_height)
+        for x0 in range(0, output_width, tile_size):
+            x1 = min(x0 + tile_size, output_width)
+            outer_x0 = max(0, x0 - padding)
+            outer_y0 = max(0, y0 - padding)
+            outer_x1 = min(output_width, x1 + padding)
+            outer_y1 = min(output_height, y1 + padding)
+            outer_size = (outer_x1 - outer_x0, outer_y1 - outer_y0)
+            source_box = (
+                outer_x0 * source_width / output_width,
+                outer_y0 * source_height / output_height,
+                outer_x1 * source_width / output_width,
+                outer_y1 * source_height / output_height,
+            )
+            resized = coverage_image.resize(
+                outer_size,
+                resample=Image.Resampling.LANCZOS,
+                box=source_box,
+            )
+            try:
+                coverage = np.asarray(resized, dtype=np.float32) / 255.0
+                active = rasterize_coverage(
+                    coverage,
+                    dpi=settings.output_dpi,
+                    frequency_lpi=settings.halftone_frequency_lpi,
+                    angle=angle,
+                    shape=settings.halftone_shape,
+                    x_offset=outer_x0,
+                    y_offset=outer_y0,
+                )
+                rendered = Image.fromarray(
+                    np.where(active, 0, 255).astype(np.uint8), mode="L"
+                ).convert("1")
+            finally:
+                resized.close()
+            inner_box = (
+                x0 - outer_x0,
+                y0 - outer_y0,
+                x1 - outer_x0,
+                y1 - outer_y0,
+            )
+            inner = rendered.crop(inner_box)
+            rendered.close()
+            plate.paste(inner, (x0, y0))
+            inner.close()
+    return plate
+
+
 def export_project(
     image: Image.Image,
     settings: Settings,
@@ -201,7 +372,9 @@ def export_project(
 ) -> Path:
     export_dir = Path(tempfile.mkdtemp(prefix="screenprint_separator_"))
     labels_path = export_dir / "classification.dat"
+    coverages_path = export_dir / "coverages.dat"
     labels: np.memmap | None = None
+    coverages: np.memmap | None = None
     work_image: Image.Image | None = None
     try:
         resized = _resize_for_print(image, settings)
@@ -212,7 +385,23 @@ def export_project(
 
         palette = build_overprint_palette(inks, settings.paper, measured_lab)
         classifier = ColorClassifier(palette, [ink.bias for ink in inks])
-        labels = _classify_tiled(work_image, classifier, settings, labels_path)
+        if settings.halftone_mode == "halftone":
+            coverages = _coverage_tiled(
+                work_image,
+                classifier,
+                settings,
+                coverages_path,
+                len(inks),
+            )
+            labels = _rasterize_working_coverages(
+                coverages,
+                palette.masks,
+                settings,
+                inks,
+                labels_path,
+            )
+        else:
+            labels = _classify_tiled(work_image, classifier, settings, labels_path)
         work_image.close()
         work_image = None
 
@@ -229,20 +418,33 @@ def export_project(
         output_size = _output_size(settings)
         plate_paths = []
         for channel, ink in enumerate(inks):
-            # Index only one channel at a time.  Indexing all masks at once creates
-            # an H x W x ink-count allocation (hundreds of MB at production DPI).
-            channel_states = np.asarray(
-                palette.masks[:, channel], dtype=np.uint8
-            ) * np.uint8(255)
-            active = np.empty(labels.shape, dtype=np.uint8)
-            np.take(channel_states, labels, out=active)
-            active_image = Image.fromarray(active, mode="L")
-            del active
-
-            try:
-                plate = _render_plate(active_image, output_size, settings)
-            finally:
-                active_image.close()
+            if coverages is not None:
+                active_image = Image.fromarray(
+                    np.array(coverages[..., channel], dtype=np.uint8), mode="L"
+                )
+                try:
+                    plate = _render_halftone_plate(
+                        active_image,
+                        output_size,
+                        settings,
+                        ink.screen_angle,
+                    )
+                finally:
+                    active_image.close()
+            else:
+                # Index only one channel at a time. Indexing all masks at once
+                # creates a large H x W x ink-count allocation.
+                channel_states = np.asarray(
+                    palette.masks[:, channel], dtype=np.uint8
+                ) * np.uint8(255)
+                active = np.empty(labels.shape, dtype=np.uint8)
+                np.take(channel_states, labels, out=active)
+                active_image = Image.fromarray(active, mode="L")
+                del active
+                try:
+                    plate = _render_plate(active_image, output_size, settings)
+                finally:
+                    active_image.close()
             try:
                 plate_path = export_dir / (
                     f"farbauszug_{channel + 1}_{_safe_name(ink.name)}.tif"
@@ -284,6 +486,10 @@ def export_project(
         _close_memmap(labels)
         labels = None
         labels_path.unlink(missing_ok=True)
+        if coverages is not None:
+            _close_memmap(coverages)
+            coverages = None
+            coverages_path.unlink(missing_ok=True)
 
         archive_path = export_dir / "screenprint_export.zip"
         with zipfile.ZipFile(
@@ -301,4 +507,7 @@ def export_project(
             work_image.close()
         if labels is not None:
             _close_memmap(labels)
+        if coverages is not None:
+            _close_memmap(coverages)
         labels_path.unlink(missing_ok=True)
+        coverages_path.unlink(missing_ok=True)

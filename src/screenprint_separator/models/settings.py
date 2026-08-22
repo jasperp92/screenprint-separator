@@ -19,6 +19,13 @@ class Settings:
     class_smooth_size: int = 3
     threshold: int = 128
     trapping_mm: float = 0.0
+    halftone_mode: str = "solid"
+    halftone_frequency_lpi: float = 45.0
+    halftone_shape: str = "circle"
+    halftone_softness: float = 4.0
+    halftone_gamma: float = 1.0
+    halftone_min_dot: float = 0.02
+    halftone_max_dot: float = 0.98
     brightness: float = 1.0
     contrast: float = 1.0
 

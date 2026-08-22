@@ -24,8 +24,6 @@ Dies ist ein Vibecoding-Projekt von mir, das ich überwiegend mit ChatGPT Codex
 
 ## TODO / Nice to have
 
-- Farbüberlagerung in einer Raster- beziehungsweise Halbtonvorschau integrieren
-- Rasterparameter wie Winkel, Frequenz und Punktform einstellbar machen
 - Bildbearbeitung um weitere stapelbare Effekte und Presets ausbauen
 - ICC-Profile und weitergehendes Farbmanagement ergänzen
 - Undo/Redo sowie speicherbare Einstellungs- und Export-Presets hinzufügen
@@ -186,6 +184,33 @@ Verarbeitungsschritt und wird nach dem Effektstapel angewandt.
   Mischfarben für alle Überdruckkombinationen
 - CMYK-Eingabe oder Auswahl aus einer lokalen JSON-Farbbibliothek
 - geordneter, nicht-destruktiver Effektstapel für das Eingabebild
+
+## AM-Raster und Verläufe
+
+Unter „Eingabe → Rasterung“, direkt unter „Textur und Glättung“, kann zwischen
+der bisherigen Volltontrennung und einem AM-Raster gewählt werden. Im
+Rastermodus berechnet die Farbzuordnung zunächst kontinuierliche
+Flächendeckungen aus den CIEDE2000-Abständen zu allen Vollton- und
+Überdruckzuständen. Erst danach werden daraus binäre Rasterpunkte erzeugt.
+Dadurch bleiben weiche Farb- und Tonwertverläufe in den 1-Bit-Farbauszügen
+erhalten.
+
+Einstellbar sind:
+
+- Rasterweite in lpi
+- Punktform Kreis, Ellipse oder Kreuz
+- distanzgewichtete Verlaufsweichheit
+- Tonwertkurve sowie Minimal- und Maximalpunkt
+- ein eigener Rasterwinkel je Druckfarbe
+
+Die interaktive Simulation rastert in der aktuellen Vorschauauflösung. Für die
+TIFF-Farbauszüge werden die kontinuierlichen Flächendeckungen dagegen zuerst auf
+die Ausgabegröße skaliert und anschließend direkt bei den eingestellten
+Ausgabe-DPI gerastert. So bleiben Rasterweite und Winkel physisch definiert.
+Automatisch und manuell bestimmte Überdruckfarben werden auch für die
+Rastervorschau verwendet. Trapping ist im Rastermodus bewusst deaktiviert, da
+eine nachträgliche Maskenerweiterung dort einem unkontrollierten Punktzuwachs
+entsprechen würde.
 
 ## CMYK und Pantone
 
