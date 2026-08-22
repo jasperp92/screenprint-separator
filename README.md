@@ -20,7 +20,7 @@ Dies ist ein Vibecoding-Projekt von mir, das ich überwiegend mit ChatGPT Codex
 - **uv** für Abhängigkeiten, virtuelle Umgebung und Projektbefehle
 - **PyInstaller / nicegui-pack** für eigenständige Windows- und macOS-Builds
 - **Ruff** für statische Codeprüfung
-- **GitHub Actions** für automatisierte macOS-Builds und Releases
+- **GitHub Actions** für automatisierte Windows- und macOS-Builds mit Releases
 
 ## TODO / Nice to have
 
@@ -140,20 +140,21 @@ Der Sitzungscache der App befindet sich dauerhaft unter:
 ### Automatischer Build mit GitHub Actions
 
 Der Workflow `.github/workflows/build-macos.yml` kann unter GitHub → Actions →
-„Build macOS App“ manuell gestartet werden. Das ZIP steht danach als
-Workflow-Artefakt zum Download bereit.
+„Build Desktop Apps“ manuell gestartet werden. Die macOS-App und die
+Windows-EXE stehen danach als separate Workflow-Artefakte zum Download bereit.
 
 Wird ein Versions-Tag gepusht, erstellt der Workflow zusätzlich automatisch ein
-GitHub Release und hängt die gebaute App daran:
+GitHub Release und hängt beide gebauten Anwendungen daran:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Der Dateiname enthält die Architektur des GitHub-Runners, beispielsweise
-`ScreenprintSeparator-macOS-arm64.zip`. Dieser Workflow erzeugt zunächst einen
-unsignierten Build. Für eine öffentliche Verteilung müssen später
+Der macOS-Dateiname enthält die Architektur des GitHub-Runners, beispielsweise
+`ScreenprintSeparator-macOS-arm64.zip`. Der Windows-Build wird als
+`ScreenprintSeparator.exe` veröffentlicht. Der Workflow erzeugt zunächst
+unsignierte Builds. Für eine öffentliche macOS-Verteilung müssen später
 Developer-ID-Zertifikat und Notarisierungsdaten als GitHub-Secrets ergänzt
 werden.
 
