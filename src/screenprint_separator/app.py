@@ -1,6 +1,6 @@
 import sys
 
-from nicegui import ui
+from nicegui import native, ui
 
 from screenprint_separator.ui.main_view import MainView
 
@@ -8,10 +8,12 @@ from screenprint_separator.ui.main_view import MainView
 def main() -> None:
     is_packaged = getattr(sys, "frozen", False)
     use_native_window = is_packaged and sys.platform == "darwin"
+    port = native.find_open_port() if is_packaged else 8080
 
     ui.run(
         root=MainView,
         title="Screenprint Separator",
+        port=port,
         reload=not is_packaged,
         uvicorn_reload_dirs="src",
         native=use_native_window,

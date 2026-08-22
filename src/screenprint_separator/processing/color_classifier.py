@@ -83,6 +83,7 @@ class ColorClassifier:
     ) -> None:
         self.palette = palette
         self.state_biases = palette.masks @ np.asarray(ink_biases, dtype=np.float32)
+        self._coverage_lookups: dict[tuple[int, float], np.ndarray] = {}
 
     def classify(self, pixels_lab: np.ndarray) -> np.ndarray:
         output_shape = pixels_lab.shape[:-1]
@@ -108,6 +109,54 @@ class ColorClassifier:
         grid_rgb = np.stack((red, green, blue), axis=-1)
         grid_lab = ColorConverter.rgb_to_lab(grid_rgb)
         lookup = self.classify(grid_lab)
+
+        indices = np.rint(
+            np.asarray(pixels_rgb, dtype=np.float32) * (resolution - 1) / 255.0
+        ).astype(np.uint8)
+        return lookup[indices[..., 0], indices[..., 1], indices[..., 2]]
+
+    def coverage_rgb_lut(
+        self,
+        pixels_rgb: np.ndarray,
+        softness: float,
+        resolution: int = 33,
+    ) -> np.ndarray:
+        """Estimate continuous ink coverages from soft palette-state weights."""
+        softness = max(0.1, float(softness))
+        key = (int(resolution), round(softness, 4))
+        lookup = self._coverage_lookups.get(key)
+        if lookup is None:
+            levels = np.linspace(0, 255, resolution, dtype=np.uint8)
+            red, green, blue = np.meshgrid(levels, levels, levels, indexing="ij")
+            grid_rgb = np.stack((red, green, blue), axis=-1)
+            grid_lab = ColorConverter.rgb_to_lab(grid_rgb)
+            distances = np.empty(
+                grid_lab.shape[:-1] + (len(self.palette.lab),), dtype=np.float32
+            )
+            for index, target in enumerate(self.palette.lab):
+                distances[..., index] = (
+                    delta_e_2000(grid_lab, target) - self.state_biases[index]
+                )
+            # Interpolate locally between nearby printable states. Inverse
+            # distances preserve a full paper-to-ink tonal ramp; an exponential
+            # softmax would only soften the old hard class boundary.
+            neighbor_count = min(4, len(self.palette.lab))
+            cutoff = np.partition(
+                distances, neighbor_count - 1, axis=-1
+            )[..., neighbor_count - 1 : neighbor_count]
+            power = 1.0 + 2.0 / softness
+            weights = np.where(
+                distances <= cutoff,
+                np.power(np.maximum(distances, 1e-3), -power),
+                0.0,
+            )
+            weights /= np.sum(weights, axis=-1, keepdims=True)
+            lookup = np.tensordot(
+                weights,
+                np.asarray(self.palette.masks, dtype=np.float32),
+                axes=([-1], [0]),
+            ).astype(np.float32)
+            self._coverage_lookups[key] = lookup
 
         indices = np.rint(
             np.asarray(pixels_rgb, dtype=np.float32) * (resolution - 1) / 255.0

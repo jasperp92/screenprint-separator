@@ -34,10 +34,20 @@ class SessionStore:
             settings = Settings(**settings_data)
 
             inks = []
-            for values in data.get("inks", []):
+            default_angles = (15.0, 75.0, 45.0, 0.0, 30.0)
+            allowed_ink_fields = {field.name for field in fields(Ink)}
+            for index, values in enumerate(data.get("inks", [])):
                 values = dict(values)
+                values = {
+                    key: value
+                    for key, value in values.items()
+                    if key in allowed_ink_fields
+                }
                 for key in ("lab", "rgb_preview", "cmyk"):
                     values[key] = tuple(values[key])
+                values.setdefault(
+                    "screen_angle", default_angles[index % len(default_angles)]
+                )
                 inks.append(Ink(**values))
             if not 1 <= len(inks) <= 5:
                 inks = fallback.inks
