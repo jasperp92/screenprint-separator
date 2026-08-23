@@ -175,6 +175,10 @@ Die Effekte sind nicht-destruktiv, werden in der Sitzung gespeichert und gelten
 gleichermaßen für Vorschau und Export. „Textur und Glättung“ bleibt ein eigener
 Verarbeitungsschritt und wird nach dem Effektstapel angewandt.
 
+Die Pipetten an Papier-, Druck- und selektiver Zielfarbe zeigen beim Überfahren
+des Eingabebilds eine Live-Farbvorschau. Der Messradius lässt sich platzsparend
+im Pipetten-Menü von einem Einzelpixel bis zu einer gemittelten Umgebung wählen.
+
 ## Farbverarbeitung
 
 - CIELAB D50 für Eingabe- und Palettenfarben

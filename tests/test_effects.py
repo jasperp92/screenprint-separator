@@ -9,6 +9,14 @@ from screenprint_separator.processing.effects import apply_effect
 from screenprint_separator.ui.main_view import MainView
 
 
+class _FakeField:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def set_value(self, value: str) -> None:
+        self.value = value
+
+
 class SelectiveColorTests(unittest.TestCase):
     @staticmethod
     def _effect(target: tuple[int, int, int]) -> ImageEffect:
@@ -54,10 +62,48 @@ class EyedropperTests(unittest.TestCase):
         view = MainView.__new__(MainView)
         view.project = SimpleNamespace(image=Image.fromarray(pixels))
         view._input_preview_size = (10, 5)
+        view._eyedropper_radius = 2
 
         sampled = view._sample_input_color(7.5, 2.5)
 
         self.assertEqual(sampled, (18, 76, 44))
+
+    def test_zero_radius_samples_exactly_one_pixel(self) -> None:
+        pixels = np.zeros((5, 5, 3), dtype=np.uint8)
+        pixels[2, 2] = (210, 35, 90)
+        view = MainView.__new__(MainView)
+        view.project = SimpleNamespace(image=Image.fromarray(pixels))
+        view._input_preview_size = (5, 5)
+        view._eyedropper_radius = 0
+
+        sampled = view._sample_input_color(2.0, 2.0)
+
+        self.assertEqual(sampled, (210, 35, 90))
+
+    def test_hover_previews_color_and_mouseleave_restores_original(self) -> None:
+        pixels = np.zeros((5, 5, 3), dtype=np.uint8)
+        pixels[2, 2] = (210, 35, 90)
+        view = MainView.__new__(MainView)
+        view.project = SimpleNamespace(
+            image=Image.fromarray(pixels),
+            rgb_array=pixels,
+            settings=SimpleNamespace(paper=(0, 0, 0)),
+        )
+        view.paper_color_picker = _FakeField("#000000")
+        view._input_preview_size = (5, 5)
+        view._eyedropper_radius = 0
+        view._eyedropper_target = ("paper", None)
+        view._eyedropper_original_color = "#000000"
+        view._eyedropper_hover_color = None
+        view._syncing_paper_controls = False
+
+        view._handle_input_preview_mouse(
+            SimpleNamespace(type="mousemove", image_x=2.0, image_y=2.0)
+        )
+        self.assertEqual(view.paper_color_picker.value, "#d2235a")
+
+        view._handle_input_preview_mouse(SimpleNamespace(type="mouseleave"))
+        self.assertEqual(view.paper_color_picker.value, "#000000")
 
 
 if __name__ == "__main__":

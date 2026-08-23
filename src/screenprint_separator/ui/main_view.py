@@ -156,7 +156,11 @@ class MainView:
         self._syncing_ink_controls = False
         self._syncing_preview_size = False
         self._syncing_print_size = False
+        self._syncing_effect_controls = False
+        self._eyedropper_radius = 0
         self._eyedropper_target: tuple[str, object | None] | None = None
+        self._eyedropper_original_color: str | None = None
+        self._eyedropper_hover_color: str | None = None
         self._input_preview_size: tuple[int, int] | None = None
         self._crop_drag_start: tuple[float, float] | None = None
         self._crop_drag_original: tuple[float, float, float, float] | None = None
@@ -427,7 +431,7 @@ class MainView:
             self.input_preview = ui.interactive_image(
                 "",
                 on_mouse=self._handle_input_preview_mouse,
-                events=["click"],
+                events=["mousemove", "click", "mouseleave"],
             ).classes("input-preview w-full rounded-md")
             with ui.row().classes("w-full items-center gap-2 px-1"):
                 ui.icon("check_circle").classes("text-green-7")
@@ -814,13 +818,11 @@ class MainView:
                     self._change_selective_target(effect, event.value)
                 ),
             ).classes("grow")
-            ui.button(
-                icon="colorize",
-                on_click=lambda effect=effect: self._activate_eyedropper(
-                    "effect", effect
-                ),
-            ).props("flat dense round").classes("shrink-0").tooltip(
-                "Zielfarbe aus dem Eingabebild aufnehmen"
+            target_picker.button.props("icon=palette")
+            self._build_eyedropper_button(
+                "effect",
+                effect,
+                "Zielfarbe aus dem Eingabebild aufnehmen",
             )
         self._build_effect_slider(
             effect,
@@ -994,11 +996,11 @@ class MainView:
                         preview=True,
                         on_change=self._change_paper_color_picker,
                     ).classes("grow")
-                    ui.button(
-                        icon="colorize",
-                        on_click=lambda: self._activate_eyedropper("paper", None),
-                    ).props("flat dense round").classes("shrink-0").tooltip(
-                        "Papierfarbe aus dem Eingabebild aufnehmen"
+                    self.paper_color_picker.button.props("icon=palette")
+                    self._build_eyedropper_button(
+                        "paper",
+                        None,
+                        "Papierfarbe aus dem Eingabebild aufnehmen",
                     )
             with (
                 ui.column().classes("w-full px-2 pb-2") as paper_lab_group,
@@ -1117,13 +1119,11 @@ class MainView:
                             self._change_ink_color_picker(ink, event.value)
                         ),
                     ).classes("grow")
-                    ui.button(
-                        icon="colorize",
-                        on_click=lambda ink=ink: self._activate_eyedropper(
-                            "ink", ink
-                        ),
-                    ).props("flat dense round").classes("shrink-0").tooltip(
-                        "Druckfarbe aus dem Eingabebild aufnehmen"
+                    color_picker.button.props("icon=palette")
+                    self._build_eyedropper_button(
+                        "ink",
+                        ink,
+                        "Druckfarbe aus dem Eingabebild aufnehmen",
                     )
 
             with ui.column().classes("w-full gap-1 px-2") as library_group:
@@ -1986,7 +1986,7 @@ class MainView:
         effect: ImageEffect,
         value: str | None,
     ) -> None:
-        if effect not in self.project.effects:
+        if self._syncing_effect_controls or effect not in self.project.effects:
             return
         rgb = _hex_to_rgb(value)
         if rgb is None:
@@ -2137,6 +2137,72 @@ class MainView:
             preview.close()
         self._refresh_effect_visualizations()
 
+    def _build_eyedropper_button(
+        self,
+        kind: str,
+        target: object | None,
+        tooltip: str,
+    ) -> None:
+        button = ui.button(icon="colorize").props("flat dense round").classes(
+            "shrink-0"
+        )
+        button.tooltip(tooltip)
+        with button, ui.menu() as menu, ui.column().classes("w-60 gap-2 p-3"):
+            ui.label("Pipette").classes("font-medium")
+            radius_label = ui.label(
+                self._eyedropper_radius_text()
+            ).classes("text-xs text-grey-7")
+            radius_slider = ui.slider(
+                min=0,
+                max=10,
+                step=1,
+                value=self._eyedropper_radius,
+                on_change=lambda event, radius_label=radius_label: (
+                    self._change_eyedropper_radius(event.value, radius_label)
+                ),
+            ).props("label-always")
+            ui.label(
+                "0 px nimmt exakt einen Pixel auf; größere Radien bilden "
+                "den Median der Umgebung."
+            ).classes("text-xs text-grey-6")
+            ui.button(
+                "Farbe aufnehmen",
+                icon="colorize",
+                on_click=lambda menu=menu, kind=kind, target=target,
+                radius_slider=radius_slider: (
+                    self._start_eyedropper(
+                        menu, kind, target, radius_slider.value
+                    )
+                ),
+            ).props("no-caps").classes("w-full")
+
+    def _eyedropper_radius_text(self, radius: int | None = None) -> str:
+        value = self._eyedropper_radius if radius is None else radius
+        diameter = value * 2 + 1
+        return f"Messradius: {value} px · {diameter} × {diameter} Pixel"
+
+    def _change_eyedropper_radius(
+        self,
+        value: float | None,
+        radius_label: object,
+    ) -> None:
+        if value is None:
+            return
+        self._eyedropper_radius = int(np.clip(round(value), 0, 10))
+        radius_label.set_text(self._eyedropper_radius_text())
+
+    def _start_eyedropper(
+        self,
+        menu: object,
+        kind: str,
+        target: object | None,
+        radius: float | None,
+    ) -> None:
+        if radius is not None:
+            self._eyedropper_radius = int(np.clip(round(radius), 0, 10))
+        menu.close()
+        self._activate_eyedropper(kind, target)
+
     def _activate_eyedropper(
         self,
         kind: str,
@@ -2150,12 +2216,28 @@ class MainView:
             self._cancel_eyedropper()
             ui.notify("Pipette abgebrochen.")
             return
+        if active is not None:
+            self._cancel_eyedropper()
         self._eyedropper_target = (kind, target)
+        self._eyedropper_original_color = self._eyedropper_color(kind, target)
+        self._eyedropper_hover_color = None
         self.input_preview.classes(add="eyedropper-active")
-        ui.notify("Pipette aktiv: Farbe im Eingabebild anklicken.")
+        ui.notify(
+            "Pipette aktiv: Bewegen zeigt die Farbe, Klicken übernimmt sie."
+        )
 
-    def _cancel_eyedropper(self) -> None:
+    def _cancel_eyedropper(self, *, restore: bool = True) -> None:
+        if restore and self._eyedropper_original_color is not None:
+            active = self._eyedropper_target
+            if active is not None:
+                self._set_eyedropper_field_color(
+                    active[0],
+                    active[1],
+                    self._eyedropper_original_color,
+                )
         self._eyedropper_target = None
+        self._eyedropper_original_color = None
+        self._eyedropper_hover_color = None
         self.input_preview.classes(remove="eyedropper-active")
 
     def _cancel_eyedropper_for(self, kind: str, target: object | None) -> None:
@@ -2167,14 +2249,33 @@ class MainView:
         self,
         event: events.MouseEventArguments,
     ) -> None:
-        if event.type != "click" or self._eyedropper_target is None:
+        if self._eyedropper_target is None:
+            return
+        if event.type == "mouseleave":
+            if self._eyedropper_original_color is not None:
+                kind, target = self._eyedropper_target
+                self._set_eyedropper_field_color(
+                    kind,
+                    target,
+                    self._eyedropper_original_color,
+                )
+                self._eyedropper_hover_color = None
+            return
+        if event.type not in {"mousemove", "click"}:
             return
         rgb = self._sample_input_color(event.image_x, event.image_y)
         if rgb is None:
             return
-        kind, target = self._eyedropper_target
-        self._cancel_eyedropper()
         color = _rgb_to_hex(rgb)
+        if event.type == "mousemove":
+            if color != self._eyedropper_hover_color:
+                kind, target = self._eyedropper_target
+                self._set_eyedropper_field_color(kind, target, color)
+                self._eyedropper_hover_color = color
+            return
+
+        kind, target = self._eyedropper_target
+        self._cancel_eyedropper(restore=False)
 
         if kind == "ink" and isinstance(target, Ink) and target in self.project.inks:
             self._change_ink_color_picker(target, color)
@@ -2193,13 +2294,51 @@ class MainView:
             and target in self.project.effects
         ):
             self._change_selective_target(target, color)
-            controls = self._effect_controls.get(id(target))
-            if controls is not None and controls.get("target_picker") is not None:
-                controls["target_picker"].set_value(color)
         else:
             ui.notify("Das Pipetten-Ziel ist nicht mehr verfügbar.", type="warning")
             return
+        self._set_eyedropper_field_color(kind, target, color)
         ui.notify(f"Farbe {color.upper()} übernommen.", type="positive")
+
+    def _eyedropper_color(
+        self,
+        kind: str,
+        target: object | None,
+    ) -> str | None:
+        if kind == "ink" and isinstance(target, Ink):
+            return _rgb_to_hex(target.rgb_preview)
+        if kind == "paper":
+            return _rgb_to_hex(self.project.settings.paper)
+        if kind == "effect" and isinstance(target, ImageEffect):
+            return _rgb_to_hex(self._effect_target_rgb(target))
+        return None
+
+    def _set_eyedropper_field_color(
+        self,
+        kind: str,
+        target: object | None,
+        color: str,
+    ) -> None:
+        if kind == "paper":
+            field = self.paper_color_picker
+            syncing_name = "_syncing_paper_controls"
+        elif kind == "ink" and isinstance(target, Ink):
+            controls = self._ink_controls.get(id(target))
+            field = controls.get("color_picker") if controls is not None else None
+            syncing_name = "_syncing_ink_controls"
+        elif kind == "effect" and isinstance(target, ImageEffect):
+            controls = self._effect_controls.get(id(target))
+            field = controls.get("target_picker") if controls is not None else None
+            syncing_name = "_syncing_effect_controls"
+        else:
+            return
+        if field is None:
+            return
+        setattr(self, syncing_name, True)
+        try:
+            field.set_value(color)
+        finally:
+            setattr(self, syncing_name, False)
 
     def _sample_input_color(
         self,
@@ -2224,8 +2363,10 @@ class MainView:
                 source_height - 1,
             )
         )
-        pixels = np.asarray(self.project.image, dtype=np.uint8)
-        radius = 2
+        pixels = getattr(self.project, "rgb_array", None)
+        if pixels is None:
+            pixels = np.asarray(self.project.image, dtype=np.uint8)
+        radius = self._eyedropper_radius
         sample = pixels[
             max(0, y - radius) : min(source_height, y + radius + 1),
             max(0, x - radius) : min(source_width, x + radius + 1),
