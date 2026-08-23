@@ -86,6 +86,10 @@ Build wird Hot Reload automatisch deaktiviert. `color_library.json` wird durch
 `--add-data` in die EXE aufgenommen. Der Sitzungscache liegt bei der gebündelten
 Anwendung dauerhaft unter
 `%USERPROFILE%\.screenprint_separator\.screenprint_separator_cache\`.
+Der App-Einstiegspunkt initialisiert PyInstallers Multiprocessing-Unterstützung.
+In der gebündelten Windows-EXE läuft der Export speicherschonend in einem
+Hintergrund-Thread, sodass kein zweiter vollständiger EXE-Prozess gestartet und
+keine zusätzliche Kopie des hochauflösenden Bilds übertragen werden muss.
 
 ## macOS-App erstellen
 

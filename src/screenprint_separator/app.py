@@ -1,4 +1,10 @@
+import multiprocessing
 import sys
+
+# PyInstaller workers re-enter the bundled executable. Divert multiprocessing
+# worker invocations before importing NiceGUI or the application UI.
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
 
 from nicegui import native, ui
 

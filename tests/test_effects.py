@@ -1,7 +1,10 @@
+import sys
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
+from nicegui import run
 from PIL import Image
 
 from screenprint_separator.models.effect import ImageEffect
@@ -104,6 +107,19 @@ class EyedropperTests(unittest.TestCase):
 
         view._handle_input_preview_mouse(SimpleNamespace(type="mouseleave"))
         self.assertEqual(view.paper_color_picker.value, "#000000")
+
+
+class ExportRunnerTests(unittest.TestCase):
+    def test_frozen_windows_export_uses_thread_pool(self) -> None:
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.object(sys, "frozen", True, create=True),
+        ):
+            self.assertIs(MainView._export_runner(), run.io_bound)
+
+    def test_source_export_keeps_process_pool(self) -> None:
+        with patch.object(sys, "platform", "win32"):
+            self.assertIs(MainView._export_runner(), run.cpu_bound)
 
 
 if __name__ == "__main__":
