@@ -7,7 +7,10 @@ from nicegui import events, run, ui
 from nicegui.elements.image import pil_to_tempfile
 from PIL import Image, ImageOps
 
-from screenprint_separator.export.plate_exporter import export_project
+from screenprint_separator.export.plate_exporter import (
+    export_project,
+    save_export_archive,
+)
 from screenprint_separator.models.effect import EFFECT_NAMES, ImageEffect
 from screenprint_separator.models.ink import Ink
 from screenprint_separator.models.project import Project
@@ -3452,11 +3455,16 @@ class MainView:
                 deepcopy(self.project.effects),
             )
             if archive is not None:
-                ui.download(archive, filename="screenprint_export.zip")
-                notification.message = "Export ist fertig."
+                save_directly = self._save_export_directly()
+                if save_directly:
+                    destination = await run.io_bound(save_export_archive, archive)
+                    notification.message = f"Export gespeichert: {destination}"
+                else:
+                    ui.download(archive, filename="screenprint_export.zip")
+                    notification.message = "Export ist fertig."
                 notification.spinner = False
                 notification.type = "positive"
-                notification.timeout = 4
+                notification.timeout = 8 if save_directly else 4
                 notification.update()
         except (
             OSError,
@@ -3475,3 +3483,7 @@ class MainView:
         if getattr(sys, "frozen", False) and sys.platform == "win32":
             return run.io_bound
         return run.cpu_bound
+
+    @staticmethod
+    def _save_export_directly() -> bool:
+        return getattr(sys, "frozen", False) and sys.platform == "darwin"

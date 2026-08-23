@@ -1,5 +1,7 @@
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -7,6 +9,7 @@ import numpy as np
 from nicegui import run
 from PIL import Image
 
+from screenprint_separator.export.plate_exporter import save_export_archive
 from screenprint_separator.models.effect import ImageEffect
 from screenprint_separator.processing.effects import apply_effect
 from screenprint_separator.ui.main_view import MainView
@@ -120,6 +123,32 @@ class ExportRunnerTests(unittest.TestCase):
     def test_source_export_keeps_process_pool(self) -> None:
         with patch.object(sys, "platform", "win32"):
             self.assertIs(MainView._export_runner(), run.cpu_bound)
+
+    def test_frozen_macos_export_is_saved_directly(self) -> None:
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch.object(sys, "frozen", True, create=True),
+        ):
+            self.assertTrue(MainView._save_export_directly())
+
+    def test_export_archive_gets_unique_download_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            downloads = root / "Downloads"
+            first_source = root / "first" / "screenprint_export.zip"
+            second_source = root / "second" / "screenprint_export.zip"
+            first_source.parent.mkdir()
+            second_source.parent.mkdir()
+            first_source.write_bytes(b"first")
+            second_source.write_bytes(b"second")
+
+            first = save_export_archive(first_source, downloads)
+            second = save_export_archive(second_source, downloads)
+
+            self.assertEqual(first.name, "screenprint_export.zip")
+            self.assertEqual(second.name, "screenprint_export (1).zip")
+            self.assertEqual(first.read_bytes(), b"first")
+            self.assertEqual(second.read_bytes(), b"second")
 
 
 if __name__ == "__main__":
