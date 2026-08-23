@@ -156,6 +156,8 @@ class MainView:
         self._syncing_ink_controls = False
         self._syncing_preview_size = False
         self._syncing_print_size = False
+        self._eyedropper_target: tuple[str, object | None] | None = None
+        self._input_preview_size: tuple[int, int] | None = None
         self._crop_drag_start: tuple[float, float] | None = None
         self._crop_drag_original: tuple[float, float, float, float] | None = None
         self._crop_drag_action: str | None = None
@@ -176,6 +178,9 @@ class MainView:
             .preview-image.crop-cursor-ns > img { cursor: ns-resize; }
             .preview-image.crop-cursor-nwse > img { cursor: nwse-resize; }
             .preview-image.crop-cursor-nesw > img { cursor: nesw-resize; }
+            .input-preview.eyedropper-active > img {
+                cursor: crosshair !important;
+            }
             .plate-preview-row {
                 display: flex !important;
                 flex-wrap: nowrap !important;
@@ -419,7 +424,11 @@ class MainView:
         with ui.column().classes(
             "w-full gap-2 rounded-lg bg-green-1 text-green-9 p-2"
         ) as upload_status:
-            self.input_preview = ui.image("").classes("w-full rounded-md")
+            self.input_preview = ui.interactive_image(
+                "",
+                on_mouse=self._handle_input_preview_mouse,
+                events=["click"],
+            ).classes("input-preview w-full rounded-md")
             with ui.row().classes("w-full items-center gap-2 px-1"):
                 ui.icon("check_circle").classes("text-green-7")
                 self.upload_status_text = ui.label().classes("grow text-sm")
@@ -633,6 +642,10 @@ class MainView:
                     EFFECT_NAMES["hue"],
                     on_click=lambda: self._add_effect("hue"),
                 )
+                ui.menu_item(
+                    EFFECT_NAMES["selective_color"],
+                    on_click=lambda: self._add_effect("selective_color"),
+                )
 
         with ui.column().classes("w-full gap-3") as effect_cards:
             self.effect_cards = effect_cards
@@ -650,6 +663,7 @@ class MainView:
 
     def _build_effect_controls(self, effect: ImageEffect) -> None:
         histogram = None
+        target_picker = None
         card = ui.expansion().props("dense expand-separator").classes(
             "warm-control effect-card w-full min-w-0 rounded-lg"
         )
@@ -746,12 +760,15 @@ class MainView:
                 )
             elif effect.kind == "hue":
                 self._build_hue_slider(effect)
+            elif effect.kind == "selective_color":
+                target_picker = self._build_selective_color_controls(effect)
 
         self._effect_controls[id(effect)] = {
             "card": card,
             "number": number,
             "summary": summary,
             "histogram": histogram,
+            "target_picker": target_picker,
         }
 
     def _build_effect_slider(
@@ -783,7 +800,57 @@ class MainView:
             "black_white": "filter_b_and_w",
             "levels": "linear_scale",
             "hue": "colorize",
+            "selective_color": "colorize",
         }.get(kind, "auto_fix_high")
+
+    def _build_selective_color_controls(self, effect: ImageEffect) -> object:
+        ui.label("Zu entfernende Farbe").classes("text-sm px-2")
+        with ui.row().classes("w-full items-center gap-2 px-2"):
+            target_picker = ui.color_input(
+                "Zielfarbe",
+                value=_rgb_to_hex(self._effect_target_rgb(effect)),
+                preview=True,
+                on_change=lambda event, effect=effect: (
+                    self._change_selective_target(effect, event.value)
+                ),
+            ).classes("grow")
+            ui.button(
+                icon="colorize",
+                on_click=lambda effect=effect: self._activate_eyedropper(
+                    "effect", effect
+                ),
+            ).props("flat dense round").classes("shrink-0").tooltip(
+                "Zielfarbe aus dem Eingabebild aufnehmen"
+            )
+        self._build_effect_slider(
+            effect,
+            "tolerance",
+            "Toleranz (ΔE)",
+            minimum=0.0,
+            maximum=60.0,
+            step=1.0,
+        )
+        self._build_effect_slider(
+            effect,
+            "softness",
+            "Weicher Übergang",
+            minimum=0.0,
+            maximum=60.0,
+            step=1.0,
+        )
+        self._build_effect_slider(
+            effect,
+            "amount",
+            "Farbanteil entfernen",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        ui.label(
+            "Die Auswahl basiert auf dem wahrnehmungsnahen CIELAB-Farbabstand. "
+            "Dadurch kann beispielsweise ein dunkles Grün getrennt von helleren "
+            "Grüntönen entsättigt werden."
+        ).classes("text-xs text-grey-6 px-2")
+        return target_picker
 
     def _build_hue_slider(self, effect: ImageEffect) -> None:
         slider = ui.slider(
@@ -920,12 +987,19 @@ class MainView:
                             ),
                         ).classes("grow min-w-[65px]")
                         self.paper_cmyk_inputs.append(field)
-                self.paper_color_picker = ui.color_input(
-                    "Farbwähler (Vorschau → CMYK)",
-                    value=_rgb_to_hex(self.project.settings.paper),
-                    preview=True,
-                    on_change=self._change_paper_color_picker,
-                ).classes("w-full")
+                with ui.row().classes("w-full items-center gap-2"):
+                    self.paper_color_picker = ui.color_input(
+                        "Farbwähler (Vorschau → CMYK)",
+                        value=_rgb_to_hex(self.project.settings.paper),
+                        preview=True,
+                        on_change=self._change_paper_color_picker,
+                    ).classes("grow")
+                    ui.button(
+                        icon="colorize",
+                        on_click=lambda: self._activate_eyedropper("paper", None),
+                    ).props("flat dense round").classes("shrink-0").tooltip(
+                        "Papierfarbe aus dem Eingabebild aufnehmen"
+                    )
             with (
                 ui.column().classes("w-full px-2 pb-2") as paper_lab_group,
                 ui.row().classes("w-full gap-2"),
@@ -1034,14 +1108,23 @@ class MainView:
                             ),
                         ).classes("grow min-w-[65px]")
                         cmyk_inputs.append(field)
-                color_picker = ui.color_input(
-                    "Farbwähler (Vorschau → CMYK)",
-                    value=_rgb_to_hex(ink.rgb_preview),
-                    preview=True,
-                    on_change=lambda event, ink=ink: self._change_ink_color_picker(
-                        ink, event.value
-                    ),
-                ).classes("w-full")
+                with ui.row().classes("w-full items-center gap-2"):
+                    color_picker = ui.color_input(
+                        "Farbwähler (Vorschau → CMYK)",
+                        value=_rgb_to_hex(ink.rgb_preview),
+                        preview=True,
+                        on_change=lambda event, ink=ink: (
+                            self._change_ink_color_picker(ink, event.value)
+                        ),
+                    ).classes("grow")
+                    ui.button(
+                        icon="colorize",
+                        on_click=lambda ink=ink: self._activate_eyedropper(
+                            "ink", ink
+                        ),
+                    ).props("flat dense round").classes("shrink-0").tooltip(
+                        "Druckfarbe aus dem Eingabebild aufnehmen"
+                    )
 
             with ui.column().classes("w-full gap-1 px-2") as library_group:
                 palette_select = ui.select(
@@ -1891,6 +1974,33 @@ class MainView:
             max(1, round(settings.print_height_cm / 2.54 * settings.dpi)),
         )
 
+    @staticmethod
+    def _effect_target_rgb(effect: ImageEffect) -> tuple[int, int, int]:
+        return tuple(
+            int(np.clip(round(effect.value(parameter)), 0, 255))
+            for parameter in ("target_r", "target_g", "target_b")
+        )
+
+    def _change_selective_target(
+        self,
+        effect: ImageEffect,
+        value: str | None,
+    ) -> None:
+        if effect not in self.project.effects:
+            return
+        rgb = _hex_to_rgb(value)
+        if rgb is None:
+            return
+        for parameter, component in zip(
+            ("target_r", "target_g", "target_b"),
+            rgb,
+            strict=True,
+        ):
+            effect.parameters[parameter] = float(component)
+        self._update_effect_summaries()
+        self._refresh_input_preview()
+        self.schedule_preview()
+
     def _change_effect_value(
         self,
         effect: ImageEffect,
@@ -1923,6 +2033,7 @@ class MainView:
     def _delete_effect(self, effect: ImageEffect) -> None:
         if effect not in self.project.effects:
             return
+        self._cancel_eyedropper_for("effect", effect)
         self.project.effects.remove(effect)
         controls = self._effect_controls.pop(id(effect))
         controls["card"].delete()
@@ -1972,9 +2083,15 @@ class MainView:
                     f"{effect.value('gamma'):.2f} / "
                     f"{effect.value('white_point'):.0f}"
                 )
-            else:
+            elif effect.kind == "hue":
                 degrees = effect.value("degrees")
                 summary = f"{EFFECT_NAMES[effect.kind]} · {degrees:+.0f}°"
+            else:
+                target = _rgb_to_hex(self._effect_target_rgb(effect)).upper()
+                summary = (
+                    f"{EFFECT_NAMES[effect.kind]} · {target} · "
+                    f"{round(effect.value('amount') * 100)} %"
+                )
             controls["summary"].set_text(summary)
 
     def _change_preview_dimension(
@@ -2012,12 +2129,109 @@ class MainView:
             preview.thumbnail((800, 800), Image.Resampling.LANCZOS)
             adjusted = apply_effects(preview, self.project.effects)
             try:
+                self._input_preview_size = adjusted.size
                 _set_pil_source(self.input_preview, adjusted)
             finally:
                 adjusted.close()
         finally:
             preview.close()
         self._refresh_effect_visualizations()
+
+    def _activate_eyedropper(
+        self,
+        kind: str,
+        target: object | None,
+    ) -> None:
+        if self.project.image is None or self._input_preview_size is None:
+            ui.notify("Bitte zuerst ein Eingabebild laden.", type="warning")
+            return
+        active = self._eyedropper_target
+        if active is not None and active[0] == kind and active[1] is target:
+            self._cancel_eyedropper()
+            ui.notify("Pipette abgebrochen.")
+            return
+        self._eyedropper_target = (kind, target)
+        self.input_preview.classes(add="eyedropper-active")
+        ui.notify("Pipette aktiv: Farbe im Eingabebild anklicken.")
+
+    def _cancel_eyedropper(self) -> None:
+        self._eyedropper_target = None
+        self.input_preview.classes(remove="eyedropper-active")
+
+    def _cancel_eyedropper_for(self, kind: str, target: object | None) -> None:
+        active = self._eyedropper_target
+        if active is not None and active[0] == kind and active[1] is target:
+            self._cancel_eyedropper()
+
+    def _handle_input_preview_mouse(
+        self,
+        event: events.MouseEventArguments,
+    ) -> None:
+        if event.type != "click" or self._eyedropper_target is None:
+            return
+        rgb = self._sample_input_color(event.image_x, event.image_y)
+        if rgb is None:
+            return
+        kind, target = self._eyedropper_target
+        self._cancel_eyedropper()
+        color = _rgb_to_hex(rgb)
+
+        if kind == "ink" and isinstance(target, Ink) and target in self.project.inks:
+            self._change_ink_color_picker(target, color)
+        elif kind == "paper":
+            self.project.settings.paper_cmyk = rgb_to_cmyk(rgb)
+            self.project.settings.paper, self.project.settings.paper_lab = (
+                color_from_cmyk(self.project.settings.paper_cmyk)
+            )
+            self.project.settings.paper_source = "cmyk"
+            self._sync_paper_controls()
+            self._sync_automatic_mixture_controls()
+            self.schedule_preview()
+        elif (
+            kind == "effect"
+            and isinstance(target, ImageEffect)
+            and target in self.project.effects
+        ):
+            self._change_selective_target(target, color)
+            controls = self._effect_controls.get(id(target))
+            if controls is not None and controls.get("target_picker") is not None:
+                controls["target_picker"].set_value(color)
+        else:
+            ui.notify("Das Pipetten-Ziel ist nicht mehr verfügbar.", type="warning")
+            return
+        ui.notify(f"Farbe {color.upper()} übernommen.", type="positive")
+
+    def _sample_input_color(
+        self,
+        image_x: float,
+        image_y: float,
+    ) -> tuple[int, int, int] | None:
+        if self.project.image is None or self._input_preview_size is None:
+            return None
+        preview_width, preview_height = self._input_preview_size
+        source_width, source_height = self.project.image.size
+        x = int(
+            np.clip(
+                image_x / max(1, preview_width) * source_width,
+                0,
+                source_width - 1,
+            )
+        )
+        y = int(
+            np.clip(
+                image_y / max(1, preview_height) * source_height,
+                0,
+                source_height - 1,
+            )
+        )
+        pixels = np.asarray(self.project.image, dtype=np.uint8)
+        radius = 2
+        sample = pixels[
+            max(0, y - radius) : min(source_height, y + radius + 1),
+            max(0, x - radius) : min(source_width, x + radius + 1),
+        ]
+        median = np.median(sample.reshape(-1, 3), axis=0)
+        return tuple(round(component) for component in median)
 
     def _change_paper_selection(
         self,
@@ -2500,6 +2714,7 @@ class MainView:
         if len(self.project.inks) <= 1:
             ui.notify("Mindestens eine Druckfarbe muss erhalten bleiben.", type="warning")
             return
+        self._cancel_eyedropper_for("ink", ink)
         captured = self._capture_overprints_by_inks()
         self.project.inks.remove(ink)
         controls = self._ink_controls.pop(id(ink))

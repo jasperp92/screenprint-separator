@@ -168,6 +168,7 @@ von oben nach unten auf das Eingabebild angewandt. Verfügbar sind derzeit:
 - Helligkeit / Kontrast
 - Schwarzweiß mit einstellbarer Stärke
 - Tonwertkorrektur mit RGB-Histogramm, Schwarzpunkt, Gamma und Weißpunkt
+- Selektive Farbe mit CIELAB-Zielfarbe, Toleranz und weicher Auswahl
 - Farbtonverschiebung von −180° bis +180° mit zyklischer Farbvorschau
 
 Die Effekte sind nicht-destruktiv, werden in der Sitzung gespeichert und gelten

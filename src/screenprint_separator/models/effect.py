@@ -20,6 +20,14 @@ EFFECT_DEFAULTS: dict[str, dict[str, float]] = {
     "hue": {
         "degrees": 0.0,
     },
+    "selective_color": {
+        "target_r": 32.0,
+        "target_g": 72.0,
+        "target_b": 48.0,
+        "tolerance": 18.0,
+        "softness": 12.0,
+        "amount": 1.0,
+    },
 }
 
 EFFECT_NAMES = {
@@ -28,6 +36,7 @@ EFFECT_NAMES = {
     "black_white": "Schwarzweiß",
     "levels": "Tonwertkorrektur",
     "hue": "Farbton",
+    "selective_color": "Selektive Farbe",
 }
 
 
