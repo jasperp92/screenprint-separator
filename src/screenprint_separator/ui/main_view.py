@@ -3443,7 +3443,7 @@ class MainView:
             timeout=None,
         )
         try:
-            archive = await run.cpu_bound(
+            archive = await self._export_runner()(
                 export_project,
                 self.project.image,
                 deepcopy(self.project.settings),
@@ -3469,3 +3469,9 @@ class MainView:
             ui.notify(f"Export fehlgeschlagen: {error}", type="negative")
         finally:
             self.export_button.enable()
+
+    @staticmethod
+    def _export_runner() -> object:
+        if getattr(sys, "frozen", False) and sys.platform == "win32":
+            return run.io_bound
+        return run.cpu_bound
