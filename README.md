@@ -129,7 +129,9 @@ open dist/ScreenprintSeparator.app
 
 Der macOS-Build öffnet die Oberfläche als natives App-Fenster mit `pywebview`.
 Hot Reload ist darin deaktiviert. Für die lokale Entwicklung bleibt weiterhin
-der Browsermodus aktiv. Da ein lokaler Build nicht mit einem Apple Developer
+der Browsermodus aktiv. Exporte aus der gebündelten App werden direkt unter
+`~/Downloads` gespeichert; vorhandene Dateien werden dabei nicht überschrieben.
+Da ein lokaler Build nicht mit einem Apple Developer
 Certificate signiert oder notarisiert ist, kann macOS beim ersten Start warnen.
 In diesem Fall kann die App im Finder über Rechtsklick → „Öffnen“ bestätigt
 werden. Für die Verteilung an andere Macs sollte die App mit einer Developer-ID

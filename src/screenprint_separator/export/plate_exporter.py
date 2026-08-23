@@ -33,6 +33,23 @@ def _safe_name(value: str) -> str:
     return normalized.lower() or "farbe"
 
 
+def save_export_archive(
+    archive_path: Path,
+    downloads_directory: Path | None = None,
+) -> Path:
+    """Move an export archive into Downloads without overwriting older exports."""
+    directory = downloads_directory or Path.home() / "Downloads"
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / archive_path.name
+    counter = 1
+    while destination.exists():
+        destination = directory / (
+            f"{archive_path.stem} ({counter}){archive_path.suffix}"
+        )
+        counter += 1
+    return Path(shutil.move(str(archive_path), destination))
+
+
 def _work_size(settings: Settings) -> tuple[int, int]:
     return (
         round(settings.print_width_cm / 2.54 * settings.dpi),
