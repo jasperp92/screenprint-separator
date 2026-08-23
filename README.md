@@ -168,11 +168,16 @@ von oben nach unten auf das Eingabebild angewandt. Verfügbar sind derzeit:
 - Helligkeit / Kontrast
 - Schwarzweiß mit einstellbarer Stärke
 - Tonwertkorrektur mit RGB-Histogramm, Schwarzpunkt, Gamma und Weißpunkt
+- Selektive Farbe mit CIELAB-Zielfarbe, Toleranz und weicher Auswahl
 - Farbtonverschiebung von −180° bis +180° mit zyklischer Farbvorschau
 
 Die Effekte sind nicht-destruktiv, werden in der Sitzung gespeichert und gelten
 gleichermaßen für Vorschau und Export. „Textur und Glättung“ bleibt ein eigener
 Verarbeitungsschritt und wird nach dem Effektstapel angewandt.
+
+Die Pipetten an Papier-, Druck- und selektiver Zielfarbe zeigen beim Überfahren
+des Eingabebilds eine Live-Farbvorschau. Der Messradius lässt sich platzsparend
+im Pipetten-Menü von einem Einzelpixel bis zu einer gemittelten Umgebung wählen.
 
 ## Farbverarbeitung
 

@@ -2,6 +2,7 @@ import numpy as np
 from PIL import Image, ImageEnhance, ImageOps
 
 from screenprint_separator.models.effect import ImageEffect
+from screenprint_separator.processing.color_converter import ColorConverter
 
 
 def _apply_saturation_vibrance(
@@ -67,6 +68,45 @@ def _apply_hue(image: Image.Image, effect: ImageEffect) -> Image.Image:
         shifted.close()
 
 
+def _apply_selective_color(image: Image.Image, effect: ImageEffect) -> Image.Image:
+    """Remove chroma around a perceptual CIELAB target color."""
+    rgb = np.asarray(image, dtype=np.uint8)
+    lab = ColorConverter.rgb_to_lab(rgb)
+    target_rgb = np.asarray(
+        [
+            np.clip(effect.value("target_r"), 0.0, 255.0),
+            np.clip(effect.value("target_g"), 0.0, 255.0),
+            np.clip(effect.value("target_b"), 0.0, 255.0),
+        ],
+        dtype=np.uint8,
+    )
+    target_lab = ColorConverter.rgb_to_lab(target_rgb)
+    distance = np.sqrt(np.sum((lab - target_lab) ** 2, axis=-1))
+    tolerance = float(np.clip(effect.value("tolerance"), 0.0, 100.0))
+    softness = float(np.clip(effect.value("softness"), 0.0, 100.0))
+    amount = float(np.clip(effect.value("amount"), 0.0, 1.0))
+
+    if softness <= 1e-7:
+        selection = (distance <= tolerance).astype(np.float32)
+    else:
+        selection = np.clip(
+            (tolerance + softness - distance) / softness,
+            0.0,
+            1.0,
+        )
+        selection = selection * selection * (3.0 - 2.0 * selection)
+
+    neutral_lab = lab.copy()
+    neutral_lab[..., 1:] = 0.0
+    neutral_rgb = ColorConverter.lab_to_rgb(neutral_lab).astype(np.float32)
+    blend = (selection * amount)[..., np.newaxis]
+    result = rgb.astype(np.float32) + (neutral_rgb - rgb) * blend
+    return Image.fromarray(
+        np.clip(np.rint(result), 0, 255).astype(np.uint8),
+        mode="RGB",
+    )
+
+
 def apply_effect(image: Image.Image, effect: ImageEffect) -> Image.Image:
     if effect.kind == "saturation_vibrance":
         return _apply_saturation_vibrance(image, effect)
@@ -89,6 +129,8 @@ def apply_effect(image: Image.Image, effect: ImageEffect) -> Image.Image:
         return _apply_levels(image, effect)
     if effect.kind == "hue":
         return _apply_hue(image, effect)
+    if effect.kind == "selective_color":
+        return _apply_selective_color(image, effect)
     raise ValueError(f"Unbekannter Bildeffekt: {effect.kind}")
 
 
