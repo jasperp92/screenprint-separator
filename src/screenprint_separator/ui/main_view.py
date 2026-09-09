@@ -38,7 +38,6 @@ from screenprint_separator.processing.image_loader import ImageLoader
 from screenprint_separator.processing.palette import (
     OverprintPalette,
     build_overprint_palette,
-    mixed_state_indices,
 )
 from screenprint_separator.processing.pipeline import (
     SeparationResult,
@@ -148,6 +147,11 @@ class MainView:
             self.project.settings.paper_source = "cmyk"
         elif self.project.settings.paper_source not in {"library", "cmyk", "lab"}:
             self.project.settings.paper_source = "library"
+        if self.project.settings.paper_id not in self._paper_options():
+            self.project.settings.paper_id = next(iter(self._paper_options()), "")
+            if self.project.settings.paper_source == "library":
+                # Retain a previously selected ink color as a custom background.
+                self.project.settings.paper_source = "cmyk"
         self._preview_busy = False
         self._preview_dirty = False
         self._effect_controls: dict[int, dict[str, object]] = {}
@@ -535,7 +539,9 @@ class MainView:
                     "Verlaufsweichheit",
                     "Steuert die distanzgewichtete Interpolation zwischen den "
                     "nächstliegenden Vollton- und Überdruckzuständen. Kleine Werte "
-                    "bleiben näher an der bisherigen harten Farbzuordnung.",
+                    "bleiben näher an der bisherigen harten Farbzuordnung. "
+                    "Neutrale Töne werden bei verfügbarer neutraler Farbachse "
+                    "direkt über deren Rasterdeckung wiedergegeben.",
                 )
                 ui.slider(
                     min=0.5,
@@ -950,20 +956,21 @@ class MainView:
             "panel-sticky-header text-xl font-semibold w-full"
         )
 
+        ui.label("Hintergrundfarbe").classes("text-lg font-semibold")
         paper_card = ui.expansion().props("dense expand-separator").classes(
-            "warm-control w-full rounded-lg"
+            "warm-control ink-card w-full min-w-0 rounded-lg"
         )
         with (
             paper_card.add_slot("header"),
-            ui.row().classes("w-full items-center gap-2 no-wrap"),
+            ui.row().classes("ink-card-header items-center gap-2 no-wrap"),
         ):
-            ui.label("Papier").classes("font-medium w-16 shrink-0")
+            ui.label("0").classes("font-semibold w-5 shrink-0")
             self.paper_swatch = ui.element("div").classes("shrink-0")
-            self.paper_summary = ui.label().classes("text-sm grow truncate")
+            self.paper_summary = ui.label().classes("ink-card-summary text-sm grow")
         with paper_card:
             self.paper_source = ui.toggle(
                 {
-                    "library": "Papier",
+                    "library": "Bibliothek",
                     "cmyk": "CMYK",
                     "lab": "LAB-Referenzfarbe",
                 },
@@ -973,10 +980,33 @@ class MainView:
             with ui.column().classes("w-full px-2 pb-2") as paper_library_group:
                 self.paper_select = ui.select(
                     self._paper_options(),
-                    label="Papier aus JSON",
+                    label="Farbe",
+                    with_input=True,
                     value=self.project.settings.paper_id,
                     on_change=self._change_paper_selection,
                 ).classes("w-full")
+                option_colors = {
+                    entry.id: _rgb_to_hex(entry.rgb)
+                    for entry in self.color_library.entries
+                    if entry.system == "paper"
+                }
+                self.paper_select.add_slot(
+                    "option",
+                    f"""
+                    <q-item v-bind="props.itemProps">
+                      <q-item-section avatar>
+                        <div :style="{{
+                          width: '28px', height: '20px', borderRadius: '4px',
+                          border: '1px solid rgba(0,0,0,.25)',
+                          backgroundColor: {option_colors!r}[props.opt.value]
+                        }}" />
+                      </q-item-section>
+                      <q-item-section>
+                        <q-item-label>{{{{ props.opt.label }}}}</q-item-label>
+                      </q-item-section>
+                    </q-item>
+                    """,
+                )
             with ui.column().classes("w-full gap-2 px-2 pb-2") as paper_cmyk_group:
                 with ui.row().classes("w-full gap-2"):
                     self.paper_cmyk_inputs = []
@@ -1003,7 +1033,7 @@ class MainView:
                     self._build_eyedropper_button(
                         "paper",
                         None,
-                        "Papierfarbe aus dem Eingabebild aufnehmen",
+                        "Hintergrundfarbe aus dem Eingabebild aufnehmen",
                     )
             with (
                 ui.column().classes("w-full px-2 pb-2") as paper_lab_group,
@@ -1024,6 +1054,22 @@ class MainView:
                         ),
                     ).classes("grow min-w-[70px]")
                     self.paper_lab_inputs.append(field)
+            self.paper_color_swatch = ui.element("div").style(
+                self._swatch_style(self.project.settings.paper)
+            ).classes("mx-2")
+            with ui.column().classes("w-full gap-2 px-2 pb-2"):
+                self._build_info_label(
+                    "Klassifikations-Bias (ΔE)",
+                    "Positive Werte bevorzugen unbedruckte Hintergrundflächen; "
+                    "negative Werte reduzieren ihren Anteil. Wirkt auch im Rastermodus.",
+                )
+                ui.slider(
+                    min=-10.0,
+                    max=20.0,
+                    step=0.5,
+                    value=self.project.settings.paper_bias,
+                    on_change=self._change_paper_bias,
+                ).props("label-always").classes("w-full")
             self.paper_library_group = paper_library_group
             self.paper_cmyk_group = paper_cmyk_group
             self.paper_lab_group = paper_lab_group
@@ -1076,7 +1122,20 @@ class MainView:
                 )
                 number = ui.label().classes("font-semibold w-5 shrink-0")
                 summary_swatch = ui.element("div").classes("shrink-0")
-                summary = ui.label().classes("ink-card-summary text-sm grow")
+                summary = ui.label().classes(
+                    "ink-card-summary text-sm grow cursor-text"
+                ).props('tabindex=0 role=button aria-label="Druckfarbe umbenennen"')
+                summary.tooltip("Klicken zum Umbenennen")
+                summary.on("click.stop", lambda ink=ink: self._edit_ink_name(ink))
+                summary.on("keydown.enter.stop", lambda ink=ink: self._edit_ink_name(ink))
+                name_input = ui.input().props(
+                    'dense borderless aria-label="Name der Druckfarbe"'
+                ).classes("grow min-w-0")
+                name_input.set_visibility(False)
+                name_input.on("click.stop", js_handler="() => {}")
+                name_input.on("keydown.enter.stop", lambda ink=ink: self._finish_ink_name(ink))
+                name_input.on("keydown.escape.stop", lambda ink=ink: self._cancel_ink_name(ink))
+                name_input.on("blur", lambda ink=ink: self._finish_ink_name(ink))
                 opacity_label = ui.label().classes("text-sm font-medium shrink-0")
                 ui.button(
                     icon="delete_outline",
@@ -1171,6 +1230,7 @@ class MainView:
                 "number": number,
                 "summary_swatch": summary_swatch,
                 "summary": summary,
+                "name_input": name_input,
                 "opacity_label": opacity_label,
                 "source": source_select,
                 "swatch": swatch,
@@ -1185,8 +1245,9 @@ class MainView:
             with ui.element("div").classes("px-2"):
                 self._build_info_label(
                     "Überdruckstärke",
-                    "Legt die Deckkraft der obenliegenden Farbe bei automatisch "
-                    "berechneten Überdruckfarben fest. Der Wert wirkt nur im "
+                    "Mischt diese Druckfarbe mit der darunterliegenden Farbe, "
+                    "beginnend mit dem Hintergrund. 50 % ergeben gleiche Anteile. "
+                    "Der Wert wirkt nur im "
                     "Automatikmodus; Pantone- und LAB-Messwerte bleiben unverändert.",
                 )
             ui.slider(
@@ -1239,13 +1300,13 @@ class MainView:
         ui.label("Überdruckfarben").classes("text-lg font-semibold")
         self._ensure_measured_overprints()
         palette = self._automatic_palette()
-        for plate_count in range(2, len(self.project.inks) + 1):
+        for plate_count in range(3, len(self.project.inks) + 2):
             states = tuple(
                 state
-                for state in mixed_state_indices(len(self.project.inks))
-                if int(palette.masks[state].sum()) == plate_count
+                for state in palette.mixed_states
+                if int(palette.levels[state]) == plate_count
             )
-            ui.label(f"{plate_count} Druckfarben").classes(
+            ui.label(f"Level {plate_count} · {plate_count - 1} Druckfarben").classes(
                 "text-xs font-medium text-grey-7 mt-1"
             )
             for state in states:
@@ -1256,9 +1317,9 @@ class MainView:
                     row.add_slot("header"),
                     ui.row().classes("w-full items-center gap-2 no-wrap"),
                 ):
-                        combination = ui.label().classes("font-medium w-16 shrink-0")
+                        combination = ui.label().classes("font-medium text-sm shrink-0")
                         swatch = ui.element("div").classes("shrink-0")
-                        status = ui.label("Automatisch").classes("text-sm grow")
+                        status = ui.label("Automatisch").classes("text-sm grow min-w-0 truncate")
                 with row:
                     mode = ui.toggle(
                         {
@@ -1300,7 +1361,27 @@ class MainView:
                                     ),
                                 ).classes("grow min-w-[70px]")
                                 lab_inputs.append(field)
+                    bias_slider = None
+                    if plate_count >= 3:
+                        with ui.column().classes("w-full gap-2 px-2 pb-2"):
+                            self._build_info_label(
+                                "Mischfarben-Bias (ΔE)",
+                                "Bevorzugt bei positiven Werten genau diese Mischung; "
+                                "negative Werte reduzieren ihren Anteil. Gilt zusätzlich "
+                                "zum Bias der beteiligten Druckfarben, auch im Rastermodus. "
+                                "Andere Kombinationen bleiben unverändert gewichtet.",
+                            )
+                            bias_slider = ui.slider(
+                                min=-20.0,
+                                max=20.0,
+                                step=0.5,
+                                value=self.project.overprint_biases.get(state, 0.0),
+                                on_change=lambda event, state=state: (
+                                    self._change_mixture_bias(state, event.value)
+                                ),
+                            ).props("label-always").classes("w-full")
                 self._mixture_controls[state] = {
+                    "bias": bias_slider,
                     "combination": combination,
                     "swatch": swatch,
                     "status": status,
@@ -1318,11 +1399,13 @@ class MainView:
         return build_overprint_palette(
             self.project.inks,
             self.project.settings.paper,
+            paper_lab=(self.project.settings.paper_lab
+                       if self.project.settings.paper_source == "lab" else None),
         )
 
     def _ensure_measured_overprints(self) -> None:
         palette = self._automatic_palette()
-        for state in mixed_state_indices(len(self.project.inks)):
+        for state in palette.mixed_states:
             self.project.measured_overprints.setdefault(
                 state,
                 tuple(float(value) for value in palette.lab[state]),
@@ -1335,12 +1418,16 @@ class MainView:
         try:
             automatic = self._automatic_palette()
             for state, controls in self._mixture_controls.items():
+                if controls["bias"] is not None:
+                    controls["bias"].set_value(self.project.overprint_biases.get(state, 0.0))
                 indices = [
                     str(index + 1)
                     for index, active in enumerate(automatic.masks[state])
                     if active
                 ]
-                controls["combination"].set_text("+".join(indices))
+                controls["combination"].set_text(" + ".join(
+                    ["0"] + indices
+                ))
                 lab = self.project.measured_overprints[state]
                 source = self.project.overprint_sources.get(state, "automatic")
                 rgb = (
@@ -1373,10 +1460,13 @@ class MainView:
             self._syncing_mixture_controls = False
 
     def _sync_automatic_mixture_controls(self) -> None:
+        for ink in self.project.inks:
+            if id(ink) in self._ink_controls:
+                self._update_ink_summary(ink)
         self._sync_mixture_controls()
 
     def _sync_overprint_controls(self) -> None:
-        self._sync_mixture_controls()
+        self._sync_automatic_mixture_controls()
 
     def _change_overprint_state_mode(self, state: int, value: str | None) -> None:
         if self._syncing_mixture_controls or value not in {
@@ -1405,6 +1495,16 @@ class MainView:
         self.project.overprint_sources[state] = "pantone"
         self.project.manual_overprint_states.add(state)
         self._sync_mixture_controls()
+        self.schedule_preview()
+
+    def _change_mixture_bias(self, state: int, value: float | None) -> None:
+        if self._syncing_mixture_controls or value is None:
+            return
+        bias = float(np.clip(value, -20.0, 20.0))
+        if bias == 0.0:
+            self.project.overprint_biases.pop(state, None)
+        else:
+            self.project.overprint_biases[state] = bias
         self.schedule_preview()
 
     def _change_mixture_lab(
@@ -2377,6 +2477,12 @@ class MainView:
         median = np.median(sample.reshape(-1, 3), axis=0)
         return tuple(round(component) for component in median)
 
+    def _change_paper_bias(self, event: events.ValueChangeEventArguments) -> None:
+        if event.value is None:
+            return
+        self.project.settings.paper_bias = float(event.value)
+        self.schedule_preview()
+
     def _change_paper_selection(
         self,
         event: events.ValueChangeEventArguments,
@@ -2386,7 +2492,7 @@ class MainView:
         identifier = event.value
         entry = self.color_library.by_id.get(identifier)
         if entry is None or entry.system != "paper":
-            ui.notify("Unbekannte Papierfarbe", type="negative")
+            ui.notify("Unbekannte Hintergrundfarbe", type="negative")
             return
         self.project.settings.paper_id = entry.id
         self.project.settings.paper = entry.rgb
@@ -2495,6 +2601,7 @@ class MainView:
                     "border:1px solid rgba(0,0,0,.25)"
                 )
             )
+            self.paper_color_swatch.style(self._swatch_style(self.project.settings.paper))
             self.paper_source.set_value(source)
             self.paper_library_group.set_visibility(source == "library")
             self.paper_cmyk_group.set_visibility(source == "cmyk")
@@ -2518,14 +2625,46 @@ class MainView:
         finally:
             self._syncing_paper_controls = False
 
-    def _change_ink_name(self, ink: Ink, value: str | None) -> None:
-        if not value:
+    def _edit_ink_name(self, ink: Ink) -> None:
+        controls = self._ink_controls[id(ink)]
+        controls["name_input"].set_value(ink.name)
+        controls["summary"].set_visibility(False)
+        controls["name_input"].set_visibility(True)
+        controls["name_input"].run_method("focus")
+        controls["name_input"].run_method("select")
+
+    def _cancel_ink_name(self, ink: Ink) -> None:
+        controls = self._ink_controls[id(ink)]
+        controls["name_input"].set_visibility(False)
+        controls["summary"].set_visibility(True)
+
+    def _finish_ink_name(self, ink: Ink) -> None:
+        controls = self._ink_controls[id(ink)]
+        if not controls["name_input"].visible:
             return
-        ink.name = value
+        if self._change_ink_name(ink, controls["name_input"].value):
+            self._cancel_ink_name(ink)
+
+    def _change_ink_name(self, ink: Ink, value: str | None) -> bool:
+        name = (value or "").strip()
+        if not name:
+            ui.notify("Bitte einen Namen eingeben.", type="warning")
+            return False
+        if any(other is not ink and other.name == name for other in self.project.inks):
+            ui.notify("Dieser Name wird bereits für eine Druckfarbe verwendet.", type="warning")
+            return False
+        previous = ink.name
+        ink.name = name
+        ink.name_is_custom = True
+        if self.project.channels and previous in self.project.channels:
+            self.project.channels[name] = self.project.channels.pop(previous)
         self._update_ink_summary(ink)
         self._update_order_label()
         self._sync_overprint_controls()
+        self._rebuild_plate_previews()
+        self._refresh_plate_previews()
         self.schedule_preview()
+        return True
 
     @staticmethod
     def _build_info_label(text: str, tooltip: str) -> None:
@@ -2580,7 +2719,9 @@ class MainView:
         controls = self._ink_controls[id(ink)]
         position = self.project.inks.index(ink)
         controls["number"].set_text(str(position + 1))
-        if ink.color_source == "library":
+        if ink.name_is_custom:
+            descriptor = ink.name
+        elif ink.color_source == "library":
             name = ink.name
             descriptor = name if name.upper().startswith("PANTONE") else f"PANTONE {name}"
         else:
@@ -2588,9 +2729,11 @@ class MainView:
             descriptor = f"CMYK {values}"
         controls["summary"].set_text(descriptor)
         controls["opacity_label"].set_text(f"{round(ink.opacity * 100)} %")
+        printed_rgb = self._printed_ink_rgb(ink)
+        controls["swatch"].style(replace=self._swatch_style(printed_rgb))
         controls["summary_swatch"].style(
             replace=(
-                f"background:{_rgb_to_hex(ink.rgb_preview)};width:34px;height:22px;"
+                f"background:{_rgb_to_hex(printed_rgb)};width:34px;height:22px;"
                 "border-radius:4px;border:1px solid rgba(0,0,0,.25)"
             )
         )
@@ -2677,7 +2820,8 @@ class MainView:
         self.schedule_preview()
 
     def _apply_library_entry(self, ink: Ink, entry: ColorEntry) -> None:
-        ink.name = entry.name
+        if not ink.name_is_custom:
+            ink.name = entry.name
         ink.pantone = entry.name if entry.system == "pantone" else ""
         ink.color_source = "library"
         ink.library_id = entry.id
@@ -2707,9 +2851,13 @@ class MainView:
         self._update_order_label()
         self._sync_overprint_controls()
 
+    def _printed_ink_rgb(self, ink: Ink) -> tuple[int, int, int]:
+        state = self.project.inks.index(ink) + 1
+        return tuple(int(value) for value in self._automatic_palette().rgb[state])
+
     def _update_ink_swatch(self, ink: Ink) -> None:
         self._ink_controls[id(ink)]["swatch"].style(
-            replace=self._swatch_style(ink.rgb_preview)
+            replace=self._swatch_style(self._printed_ink_rgb(ink))
         )
 
     def _reload_color_library(self) -> None:
@@ -2756,7 +2904,7 @@ class MainView:
             entry.system == "paper" for entry in self.color_library.entries
         )
         ui.notify(
-            f"{ink_count} Druckfarben und {paper_count} Papierfarben geladen",
+            f"{ink_count} Druckfarben und {paper_count} Hintergrundfarben geladen",
             type="positive",
         )
         self._sync_overprint_controls()
@@ -2784,7 +2932,7 @@ class MainView:
     def _capture_overprints_by_inks(self) -> dict[frozenset[int], dict[str, object]]:
         palette = self._automatic_palette()
         captured = {}
-        for state in mixed_state_indices(len(self.project.inks)):
+        for state in palette.mixed_states:
             key = frozenset(
                 id(ink)
                 for active, ink in zip(
@@ -2793,6 +2941,7 @@ class MainView:
                 if active
             )
             captured[key] = {
+                "bias": self.project.overprint_biases.get(state),
                 "lab": self.project.measured_overprints.get(state),
                 "manual": state in self.project.manual_overprint_states,
                 "source": self.project.overprint_sources.get(state),
@@ -2809,7 +2958,8 @@ class MainView:
         self.project.manual_overprint_states = set()
         self.project.overprint_sources = {}
         self.project.overprint_library_ids = {}
-        for state in mixed_state_indices(len(self.project.inks)):
+        self.project.overprint_biases = {}
+        for state in palette.mixed_states:
             key = frozenset(
                 id(ink)
                 for active, ink in zip(
@@ -2820,6 +2970,8 @@ class MainView:
             values = captured.get(key)
             if values is None:
                 continue
+            if values["bias"] is not None:
+                self.project.overprint_biases[state] = values["bias"]
             if values["lab"] is not None:
                 self.project.measured_overprints[state] = values["lab"]
             if values["manual"]:
@@ -2884,39 +3036,7 @@ class MainView:
         target = index + direction
         if not 0 <= target < len(self.project.inks):
             return
-        masks = self._automatic_palette().masks
-        measured_by_inks = {
-            frozenset(
-                id(candidate)
-                for active, candidate in zip(masks[state], self.project.inks, strict=True)
-                if active
-            ): lab
-            for state, lab in self.project.measured_overprints.items()
-        }
-        manual_ink_sets = {
-            frozenset(
-                id(candidate)
-                for active, candidate in zip(masks[state], self.project.inks, strict=True)
-                if active
-            )
-            for state in self.project.manual_overprint_states
-        }
-        source_by_inks = {
-            frozenset(
-                id(candidate)
-                for active, candidate in zip(masks[state], self.project.inks, strict=True)
-                if active
-            ): source
-            for state, source in self.project.overprint_sources.items()
-        }
-        library_by_inks = {
-            frozenset(
-                id(candidate)
-                for active, candidate in zip(masks[state], self.project.inks, strict=True)
-                if active
-            ): identifier
-            for state, identifier in self.project.overprint_library_ids.items()
-        }
+        captured = self._capture_overprints_by_inks()
         self.project.inks[index], self.project.inks[target] = (
             self.project.inks[target],
             self.project.inks[index],
@@ -2927,26 +3047,8 @@ class MainView:
                 position,
             )
             self._update_ink_summary(ordered_ink)
-        remapped_manual_states = set()
-        remapped_sources = {}
-        remapped_library_ids = {}
-        for state in mixed_state_indices(len(self.project.inks)):
-            key = frozenset(
-                id(candidate)
-                for active, candidate in zip(masks[state], self.project.inks, strict=True)
-                if active
-            )
-            if key in measured_by_inks:
-                self.project.measured_overprints[state] = measured_by_inks[key]
-            if key in manual_ink_sets:
-                remapped_manual_states.add(state)
-            if key in source_by_inks:
-                remapped_sources[state] = source_by_inks[key]
-            if key in library_by_inks:
-                remapped_library_ids[state] = library_by_inks[key]
-        self.project.manual_overprint_states = remapped_manual_states
-        self.project.overprint_sources = remapped_sources
-        self.project.overprint_library_ids = remapped_library_ids
+        self._restore_overprints_by_inks(captured)
+        self._ensure_measured_overprints()
         self._update_order_label()
         self._sync_overprint_controls()
         self.schedule_preview()
@@ -2958,13 +3060,14 @@ class MainView:
             state: self.project.measured_overprints[state]
             for state in self.project.manual_overprint_states
             if state in self.project.measured_overprints
+            and len(self.project.inks) < state < 2 ** len(self.project.inks)
         }
         return measured or None
 
     def _update_order_label(self) -> None:
         if not hasattr(self, "order_label"):
             return
-        order = " → ".join(ink.name for ink in self.project.inks)
+        order = " → ".join(["0"] + [ink.name for ink in self.project.inks])
         self.order_label.set_text(f"Druckreihenfolge: {order}")
 
     async def load_image(self, event: events.UploadEventArguments) -> None:
@@ -3085,6 +3188,7 @@ class MainView:
                 deepcopy(self.project.inks),
                 deepcopy(self._active_measured_overprints()),
                 deepcopy(self.project.effects),
+                deepcopy(self.project.overprint_biases),
             )
             if result is None:
                 return
@@ -3101,25 +3205,14 @@ class MainView:
     def _palette_tooltip(self, state: int, name: str) -> str:
         if state == 0:
             if self.project.settings.paper_source == "lab":
-                return "Papier · LAB-Referenzfarbe"
+                return "0 · LAB-Referenzfarbe"
             if self.project.settings.paper_source == "cmyk":
                 components = "/".join(
                     f"{value:g}" for value in self.project.settings.paper_cmyk
                 )
-                return f"Papier · CMYK {components}"
+                return f"0 · CMYK {components}"
             entry = self.color_library.by_id.get(self.project.settings.paper_id)
-            return f"Papier · {entry.name if entry is not None else 'Papierfarbe'}"
-        if state <= len(self.project.inks):
-            ink = self.project.inks[state - 1]
-            if ink.color_source == "library":
-                value = ink.name
-                if not value.upper().startswith("PANTONE"):
-                    value = f"PANTONE {value}"
-            else:
-                components = "/".join(f"{value:g}" for value in ink.cmyk)
-                value = f"CMYK {components}"
-            return f"{ink.name} · {value}"
-
+            return f"0 · {entry.name if entry is not None else 'Farbe 0'}"
         source = self.project.overprint_sources.get(state, "automatic")
         if source == "pantone":
             identifier = self.project.overprint_library_ids.get(state)
@@ -3410,7 +3503,7 @@ class MainView:
                 result.palette.masks,
                 strict=True,
             )):
-                plate_count = int(mask.sum())
+                plate_count = int(result.palette.levels[state])
                 if (
                     previous_plate_count is not None
                     and plate_count != previous_plate_count
@@ -3425,7 +3518,7 @@ class MainView:
                     for index, is_active in enumerate(mask)
                     if is_active
                 ]
-                number = "+".join(active) if active else "Papier"
+                number = " + ".join(["0"] + active)
                 tooltip = self._palette_tooltip(state, name)
                 with ui.column().classes("gap-0 items-center"):
                     ui.element("div").style(
@@ -3453,6 +3546,7 @@ class MainView:
                 deepcopy(self.project.inks),
                 deepcopy(self._active_measured_overprints()),
                 deepcopy(self.project.effects),
+                deepcopy(self.project.overprint_biases),
             )
             if archive is not None:
                 save_directly = self._save_export_directly()

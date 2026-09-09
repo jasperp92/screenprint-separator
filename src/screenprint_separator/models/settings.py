@@ -29,6 +29,7 @@ class Settings:
     brightness: float = 1.0
     contrast: float = 1.0
 
+    paper_bias: float = 0.0
     paper_id: str = "paper-bright-white"
     paper: tuple[int, int, int] = (255, 255, 255)
     paper_source: str = "library"

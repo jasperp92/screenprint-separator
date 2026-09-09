@@ -80,10 +80,88 @@ class ColorClassifier:
         self,
         palette: OverprintPalette,
         ink_biases: tuple[float, ...] | list[float],
+        *,
+        paper_bias: float = 0.0,
+        overprint_biases: dict[int, float] | None = None,
     ) -> None:
         self.palette = palette
         self.state_biases = palette.masks @ np.asarray(ink_biases, dtype=np.float32)
+        # The substrate is present everywhere; its bias controls bare paper only.
+        self.state_biases[0] = paper_bias
+        for state, bias in (overprint_biases or {}).items():
+            if 0 < state < len(palette.names):
+                self.state_biases[state] += float(bias)
         self._coverage_lookups: dict[tuple[int, float], np.ndarray] = {}
+        self._neutral_ramp = self._find_neutral_ramp()
+
+    def _find_neutral_ramp(self) -> tuple[int, int] | None:
+        """Find neutral endpoints connected by exactly one physical ink channel."""
+        chroma = np.hypot(self.palette.lab[:, 1], self.palette.lab[:, 2])
+        neutral = np.flatnonzero(chroma <= 2.0)
+        best = None
+        best_score = (0.0, 0)
+        for offset, first in enumerate(neutral):
+            for second in neutral[offset + 1:]:
+                masks = self.palette.masks[[first, second]]
+                if np.count_nonzero(masks[0] != masks[1]) != 1:
+                    continue
+                span = abs(float(self.palette.lab[first, 0] - self.palette.lab[second, 0]))
+                # Prefer a broad tonal range, then fewer plates. An opaque white
+                # must not bring along invisible colored underprints as a tie.
+                score = (span, -int(masks.sum()))
+                if span > 1.0 and score > best_score:
+                    best = (int(first), int(second))
+                    best_score = score
+        return best
+
+    def _preserve_neutral_tones(
+        self, pixels_rgb: np.ndarray, coverages: np.ndarray
+    ) -> np.ndarray:
+        """Represent near-neutral tones through one neutral physical dot ramp."""
+        if self._neutral_ramp is None:
+            return coverages
+        pixels = np.asarray(pixels_rgb, dtype=np.float32).reshape(-1, 3)
+        # A cheap prefilter avoids converting every saturated pixel to LAB.
+        candidates = np.flatnonzero(np.ptp(pixels, axis=1) <= 48.0)
+        if not len(candidates):
+            return coverages
+        lab = ColorConverter.rgb_to_lab(pixels[candidates])
+        chroma = np.hypot(lab[:, 1], lab[:, 2])
+        selected = chroma < 12.0
+        candidates = candidates[selected]
+        if not len(candidates):
+            return coverages
+        chroma = chroma[selected]
+        first, second = self._neutral_ramp
+        start, end = self.palette.rgb[[first, second]].astype(np.float32)
+        direction = end - start
+        length_squared = float(direction @ direction)
+        if length_squared < 1e-6:
+            return coverages
+        # Match the area-averaged RGB of the two rendered endpoint states.
+        # Clamp out-of-range highlights/shadows instead of adding colored ink.
+        fraction = np.clip(
+            (pixels[candidates] - start) @ direction / length_squared, 0.0, 1.0
+        )
+        span = max(1.0, float(delta_e_2000(
+            self.palette.lab[first], self.palette.lab[second]
+        )))
+        bias_difference = self.state_biases[second] - self.state_biases[first]
+        odds = np.exp(float(np.clip(2.0 * bias_difference / span, -20.0, 20.0)))
+        # Bias may move the tone along this ramp, but cannot introduce a hue.
+        fraction = fraction * odds / (1.0 - fraction + fraction * odds)
+        ramp = (
+            (1.0 - fraction[:, None]) * self.palette.masks[first]
+            + fraction[:, None] * self.palette.masks[second]
+        )
+        transition = np.clip((chroma - 4.0) / 8.0, 0.0, 1.0)
+        strength = 1.0 - transition**2 * (3.0 - 2.0 * transition)
+        flat = coverages.reshape(-1, coverages.shape[-1])
+        flat[candidates] = (
+            ramp * strength[:, None]
+            + flat[candidates] * (1.0 - strength[:, None])
+        )
+        return coverages
 
     def classify(self, pixels_lab: np.ndarray) -> np.ndarray:
         output_shape = pixels_lab.shape[:-1]
@@ -161,7 +239,8 @@ class ColorClassifier:
         indices = np.rint(
             np.asarray(pixels_rgb, dtype=np.float32) * (resolution - 1) / 255.0
         ).astype(np.uint8)
-        return lookup[indices[..., 0], indices[..., 1], indices[..., 2]]
+        coverages = lookup[indices[..., 0], indices[..., 1], indices[..., 2]]
+        return self._preserve_neutral_tones(pixels_rgb, coverages)
 
     def classify_tiled(self, pixels_lab: np.ndarray, tile_size: int = 512) -> np.ndarray:
         height, width = pixels_lab.shape[:2]

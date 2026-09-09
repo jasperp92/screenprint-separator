@@ -23,7 +23,7 @@ class HalftoneTests(unittest.TestCase):
             )
         )
         palette = build_overprint_palette(
-            [Ink("Schwarz", black_lab, black)], (255, 255, 255)
+            [Ink("Schwarz", black_lab, black, opacity=1.0)], (255, 255, 255)
         )
         classifier = ColorClassifier(palette, [0.0])
         levels = np.asarray([0, 64, 128, 192, 255], dtype=np.uint8)

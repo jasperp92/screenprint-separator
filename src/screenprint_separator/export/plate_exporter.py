@@ -386,6 +386,7 @@ def export_project(
     inks: list[Ink],
     measured_lab: dict[int, tuple[float, float, float]] | None = None,
     effects: list[ImageEffect] | None = None,
+    overprint_biases: dict[int, float] | None = None,
 ) -> Path:
     export_dir = Path(tempfile.mkdtemp(prefix="screenprint_separator_"))
     labels_path = export_dir / "classification.dat"
@@ -400,8 +401,16 @@ def export_project(
         finally:
             resized.close()
 
-        palette = build_overprint_palette(inks, settings.paper, measured_lab)
-        classifier = ColorClassifier(palette, [ink.bias for ink in inks])
+        palette = build_overprint_palette(
+            inks, settings.paper, measured_lab,
+            paper_lab=(settings.paper_lab if settings.paper_source == "lab" else None)
+        )
+        classifier = ColorClassifier(
+            palette,
+            [ink.bias for ink in inks],
+            paper_bias=settings.paper_bias,
+            overprint_biases=overprint_biases,
+        )
         if settings.halftone_mode == "halftone":
             coverages = _coverage_tiled(
                 work_image,
@@ -480,6 +489,7 @@ def export_project(
             "format": "screenprint-separator-project-v1",
             "settings": asdict(settings),
             "effects": [asdict(effect) for effect in effects or []],
+            "overprint_biases": overprint_biases or {},
             "print_order": [ink.name for ink in inks],
             "inks": [asdict(ink) for ink in inks],
             "palette": [
@@ -487,6 +497,8 @@ def export_project(
                     "state": index,
                     "name": palette.names[index],
                     "mask": palette.masks[index].tolist(),
+                    "paper": True,
+                    "level": int(palette.levels[index]),
                     "rgb": palette.rgb[index].tolist(),
                     "lab_d50": [round(float(value), 4) for value in palette.lab[index]],
                     "measured": index in (measured_lab or {}),

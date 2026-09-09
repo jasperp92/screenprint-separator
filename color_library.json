@@ -36,6 +36,16 @@
       ]
     },
     {
+      "id": "paper-black",
+      "name": "Schwarz",
+      "system": "paper",
+      "rgb": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
       "id": "paper-bright-white",
       "name": "Reinweiß",
       "system": "paper",

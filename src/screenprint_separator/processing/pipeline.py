@@ -90,6 +90,7 @@ def process_image(
     inks: list[Ink],
     measured_lab: dict[int, tuple[float, float, float]] | None = None,
     effects: list[ImageEffect] | None = None,
+    overprint_biases: dict[int, float] | None = None,
     *,
     preview: bool = True,
 ) -> SeparationResult:
@@ -108,8 +109,16 @@ def process_image(
     working.close()
     working = smoothed
     rgb = np.asarray(working, dtype=np.uint8)
-    palette = build_overprint_palette(inks, settings.paper, measured_lab)
-    classifier = ColorClassifier(palette, [ink.bias for ink in inks])
+    palette = build_overprint_palette(
+        inks, settings.paper, measured_lab,
+        paper_lab=(settings.paper_lab if settings.paper_source == "lab" else None)
+    )
+    classifier = ColorClassifier(
+        palette,
+        [ink.bias for ink in inks],
+        paper_bias=settings.paper_bias,
+        overprint_biases=overprint_biases,
+    )
     coverages = None
     if settings.halftone_mode == "halftone":
         coverages = classifier.coverage_rgb_lut(rgb, settings.halftone_softness)

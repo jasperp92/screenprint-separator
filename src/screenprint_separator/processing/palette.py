@@ -13,12 +13,22 @@ class OverprintPalette:
     masks: np.ndarray
     rgb: np.ndarray
     lab: np.ndarray
+    @property
+    def mixed_states(self) -> tuple[int, ...]:
+        """Every printed state is a mixture on the paper substrate."""
+        return tuple(range(1, len(self.names)))
+
+    @property
+    def levels(self) -> np.ndarray:
+        return self.masks.sum(axis=1) + 1
 
 
 def build_overprint_palette(
     inks: list[Ink],
     paper_rgb: tuple[int, int, int],
     measured_lab: dict[int, tuple[float, float, float]] | None = None,
+    *,
+    paper_lab: tuple[float, float, float] | None = None,
 ) -> OverprintPalette:
     if not 1 <= len(inks) <= 5:
         raise ValueError("Für die Separation werden eine bis fünf Farben benötigt.")
@@ -37,30 +47,24 @@ def build_overprint_palette(
 
     for mask in masks:
         result = paper.copy()
-        active_names = []
+        active_names = ["0"]
 
         for is_active, ink in zip(mask, inks, strict=True):
             if not is_active:
                 continue
             ink_rgb = np.asarray(ink.rgb_preview, dtype=np.float32)
-            if active_names:
-                alpha = float(np.clip(ink.opacity, 0.0, 1.0))
-                result = result * (1.0 - alpha) + ink_rgb * alpha
-            else:
-                result = ink_rgb.copy()
+            alpha = float(np.clip(ink.opacity, 0.0, 1.0))
+            result = result * (1.0 - alpha) + ink_rgb * alpha
             active_names.append(ink.name)
 
         colors.append(result)
-        names.append("Papier" if not active_names else " + ".join(active_names))
+        names.append(" + ".join(active_names))
 
     rgb = np.clip(np.rint(colors), 0, 255).astype(np.uint8)
     lab = ColorConverter.rgb_to_lab(rgb)
 
-    # Preserve user-supplied LAB values for the three solid inks. Only the
-    # unmeasured overprints need to use the RGB/opacity approximation.
-    for state, ink in zip(range(1, len(inks) + 1), inks, strict=True):
-        lab[state] = ink.lab
-        rgb[state] = ink.rgb_preview
+    if paper_lab is not None:
+        lab[0] = paper_lab
 
     if measured_lab:
         for state, values in measured_lab.items():
