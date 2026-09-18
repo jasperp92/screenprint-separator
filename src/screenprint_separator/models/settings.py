@@ -36,3 +36,5 @@ class Settings:
     paper_cmyk: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     paper_lab: tuple[float, float, float] = (100.0, 0.0, 0.0)
     overprint_mode: str = "automatic"
+    ignore_paper_in_mixing: bool = False
+    preserve_solid_ink_colors: bool = False

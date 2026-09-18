@@ -500,6 +500,37 @@ class MainView:
 
         self._build_halftone_settings()
         self._build_trapping_settings()
+        self._build_overprint_strength_settings()
+
+    def _build_overprint_strength_settings(self) -> None:
+        with ui.expansion("Überdruckstärke", icon="opacity").classes("w-full"):
+            self._build_info_label(
+                "Papierebene als Druckfarbe ignorieren",
+                "Die Hintergrundfarbe bleibt in der Simulation sichtbar, wird aber "
+                "nicht in die automatisch berechneten Druck- und Mischfarben "
+                "eingerechnet. Die erste aktive Druckfarbe bildet stattdessen die Basis.",
+            )
+            ui.toggle(
+                {False: "Aus", True: "Ein"},
+                value=self.project.settings.ignore_paper_in_mixing,
+                on_change=lambda event: self._change_overprint_strength_option(
+                    "ignore_paper_in_mixing", event.value
+                ),
+            ).props("spread no-caps").classes("w-full")
+
+            self._build_info_label(
+                "Überdruckstärke für Farbsimulation ignorieren",
+                "Einzelne Druckfarben behalten ihre festgelegten RGB- und LAB-Werte, "
+                "wenn die Überdruckstärke geändert wird. Die Stärke beeinflusst "
+                "weiterhin die Berechnung neuer Überdruck-Mischfarben.",
+            )
+            ui.toggle(
+                {False: "Aus", True: "Ein"},
+                value=self.project.settings.preserve_solid_ink_colors,
+                on_change=lambda event: self._change_overprint_strength_option(
+                    "preserve_solid_ink_colors", event.value
+                ),
+            ).props("spread no-caps").classes("w-full")
 
     def _build_halftone_settings(self) -> None:
         with ui.expansion("Rasterung", icon="grain").classes("w-full"):
@@ -1401,6 +1432,12 @@ class MainView:
             self.project.settings.paper,
             paper_lab=(self.project.settings.paper_lab
                        if self.project.settings.paper_source == "lab" else None),
+            ignore_paper_in_mixing=(
+                self.project.settings.ignore_paper_in_mixing
+            ),
+            preserve_solid_ink_colors=(
+                self.project.settings.preserve_solid_ink_colors
+            ),
         )
 
     def _ensure_measured_overprints(self) -> None:
@@ -1694,6 +1731,16 @@ class MainView:
         self._save_session()
         if refresh:
             self.schedule_preview()
+
+    def _change_overprint_strength_option(
+        self, name: str, value: bool | None
+    ) -> None:
+        if value is None:
+            return
+        setattr(self.project.settings, name, bool(value))
+        self._sync_automatic_mixture_controls()
+        self._save_session()
+        self.schedule_preview()
 
     def _change_halftone_mode(
         self, event: events.ValueChangeEventArguments

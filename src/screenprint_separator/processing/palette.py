@@ -29,6 +29,8 @@ def build_overprint_palette(
     measured_lab: dict[int, tuple[float, float, float]] | None = None,
     *,
     paper_lab: tuple[float, float, float] | None = None,
+    ignore_paper_in_mixing: bool = False,
+    preserve_solid_ink_colors: bool = False,
 ) -> OverprintPalette:
     if not 1 <= len(inks) <= 5:
         raise ValueError("Für die Separation werden eine bis fünf Farben benötigt.")
@@ -46,17 +48,22 @@ def build_overprint_palette(
     names = []
 
     for mask in masks:
-        result = paper.copy()
+        result = None if ignore_paper_in_mixing else paper.copy()
         active_names = ["0"]
 
         for is_active, ink in zip(mask, inks, strict=True):
             if not is_active:
                 continue
             ink_rgb = np.asarray(ink.rgb_preview, dtype=np.float32)
-            alpha = float(np.clip(ink.opacity, 0.0, 1.0))
-            result = result * (1.0 - alpha) + ink_rgb * alpha
+            if result is None:
+                result = ink_rgb.copy()
+            else:
+                alpha = float(np.clip(ink.opacity, 0.0, 1.0))
+                result = result * (1.0 - alpha) + ink_rgb * alpha
             active_names.append(ink.name)
 
+        if result is None:
+            result = paper.copy()
         colors.append(result)
         names.append(" + ".join(active_names))
 
@@ -65,6 +72,11 @@ def build_overprint_palette(
 
     if paper_lab is not None:
         lab[0] = paper_lab
+
+    if preserve_solid_ink_colors:
+        for state, ink in zip(range(1, len(inks) + 1), inks, strict=True):
+            lab[state] = ink.lab
+            rgb[state] = ink.rgb_preview
 
     if measured_lab:
         for state, values in measured_lab.items():

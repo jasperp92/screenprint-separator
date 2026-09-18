@@ -111,7 +111,9 @@ def process_image(
     rgb = np.asarray(working, dtype=np.uint8)
     palette = build_overprint_palette(
         inks, settings.paper, measured_lab,
-        paper_lab=(settings.paper_lab if settings.paper_source == "lab" else None)
+        paper_lab=(settings.paper_lab if settings.paper_source == "lab" else None),
+        ignore_paper_in_mixing=settings.ignore_paper_in_mixing,
+        preserve_solid_ink_colors=settings.preserve_solid_ink_colors,
     )
     classifier = ColorClassifier(
         palette,

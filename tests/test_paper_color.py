@@ -154,6 +154,44 @@ class PaperMixtureTests(unittest.TestCase):
         palette = build_overprint_palette([blue, red], (240, 200, 100))
         np.testing.assert_array_equal(palette.rgb[3], [190, 75, 62])
 
+    def test_paper_can_be_ignored_for_automatic_mixtures(self):
+        inks = [
+            Ink("Rot", (50, 60, 40), (200, 0, 0), opacity=0.5),
+            Ink("Blau", (30, 20, -50), (0, 0, 200), opacity=0.25),
+        ]
+        palette = build_overprint_palette(
+            inks, (240, 200, 100), ignore_paper_in_mixing=True
+        )
+        np.testing.assert_array_equal(palette.rgb[0], [240, 200, 100])
+        np.testing.assert_array_equal(palette.rgb[1], [200, 0, 0])
+        np.testing.assert_array_equal(palette.rgb[3], [150, 0, 50])
+
+    def test_solid_inks_can_ignore_opacity_while_mixtures_use_it(self):
+        inks = [
+            Ink("Rot", (50, 60, 40), (200, 0, 0), opacity=0.5),
+            Ink("Blau", (30, 20, -50), (0, 0, 200), opacity=0.25),
+        ]
+        palette = build_overprint_palette(
+            inks, (240, 200, 100), preserve_solid_ink_colors=True
+        )
+        np.testing.assert_array_equal(palette.rgb[1], [200, 0, 0])
+        np.testing.assert_array_equal(palette.rgb[2], [0, 0, 200])
+        np.testing.assert_array_equal(palette.rgb[3], [165, 75, 88])
+        np.testing.assert_allclose(palette.lab[1], inks[0].lab)
+
+    def test_overprint_strength_options_are_restored_from_session(self):
+        settings = Settings(
+            ignore_paper_in_mixing=True,
+            preserve_solid_ink_colors=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            inks = [Ink("Schwarz", (0, 0, 0), (0, 0, 0))]
+            store.save(Project(settings, inks), None)
+            restored, _ = store.load(Project(Settings(), inks))
+        self.assertTrue(restored.settings.ignore_paper_in_mixing)
+        self.assertTrue(restored.settings.preserve_solid_ink_colors)
+
     def test_legacy_paper_measurement_is_migrated_to_single_state(self):
         ink = Ink("Schwarz", (0, 0, 0), (0, 0, 0))
         with tempfile.TemporaryDirectory() as directory:
