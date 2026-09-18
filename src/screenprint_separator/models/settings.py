@@ -29,9 +29,12 @@ class Settings:
     brightness: float = 1.0
     contrast: float = 1.0
 
+    paper_bias: float = 0.0
     paper_id: str = "paper-bright-white"
     paper: tuple[int, int, int] = (255, 255, 255)
     paper_source: str = "library"
     paper_cmyk: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     paper_lab: tuple[float, float, float] = (100.0, 0.0, 0.0)
     overprint_mode: str = "automatic"
+    ignore_paper_in_mixing: bool = False
+    preserve_solid_ink_colors: bool = False

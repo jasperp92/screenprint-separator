@@ -28,3 +28,4 @@ class Project:
     manual_overprint_states: set[int] = field(default_factory=set)
     overprint_sources: dict[int, str] = field(default_factory=dict)
     overprint_library_ids: dict[int, str] = field(default_factory=dict)
+    overprint_biases: dict[int, float] = field(default_factory=dict)

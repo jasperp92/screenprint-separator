@@ -94,6 +94,12 @@ class SessionStore:
                 int(state): identifier
                 for state, identifier in data.get("overprint_library_ids", {}).items()
             }
+            project.overprint_biases = {
+                int(state): float(bias)
+                for state, bias in data.get("overprint_biases", {}).items()
+            }
+            if data.get("version", 1) < 2:
+                self._migrate_paper_states(project)
             if self.image_path.exists():
                 with Image.open(self.image_path) as cached:
                     project.image = cached.convert("RGB")
@@ -102,10 +108,42 @@ class SessionStore:
         except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
             return fallback, None
 
+    @staticmethod
+    def _migrate_paper_states(project: Project) -> None:
+        """Merge the former optional paper variants into physical plate states."""
+        count = 2 ** len(project.inks)
+        mappings = (
+            project.measured_overprints,
+            project.overprint_sources,
+            project.overprint_library_ids,
+            project.overprint_biases,
+        )
+        states = set().union(*mappings, project.manual_overprint_states)
+        winners = {}
+        for state in sorted(states):
+            if not 1 <= state < 2 * count - 1:
+                continue
+            target = state if state < count else state - count + 1
+            priority = (state in project.manual_overprint_states, state >= count)
+            if target not in winners or priority > winners[target][0]:
+                winners[target] = (priority, state)
+        for mapping in mappings:
+            remapped = {
+                target: mapping[state]
+                for target, (_, state) in winners.items()
+                if state in mapping
+            }
+            mapping.clear()
+            mapping.update(remapped)
+        project.manual_overprint_states = {
+            target for target, (_, state) in winners.items()
+            if state in project.manual_overprint_states
+        }
+
     def save(self, project: Project, filename: str | None) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 1,
+            "version": 2,
             "filename": filename,
             "settings": asdict(project.settings),
             "inks": [asdict(ink) for ink in project.inks],
@@ -114,6 +152,7 @@ class SessionStore:
             "manual_overprint_states": sorted(project.manual_overprint_states),
             "overprint_sources": project.overprint_sources,
             "overprint_library_ids": project.overprint_library_ids,
+            "overprint_biases": project.overprint_biases,
         }
         temporary = self.state_path.with_suffix(".tmp")
         temporary.write_text(

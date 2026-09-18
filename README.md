@@ -319,3 +319,62 @@ Die Anwendung speichert die letzten Einstellungen und das zuletzt geladene Bild
 lokal unter `.screenprint_separator_cache/`. Nach einem Neustart oder Hot Reload
 werden Farben, Reihenfolge, Regler, Überdruckquellen und Eingabebild automatisch
 wiederhergestellt. Der Cache ist über `.gitignore` vom Repository ausgeschlossen.
+
+### Papier als feste Grundfarbe
+
+Papier ist immer die erste Farbe mit 100 % Deckkraft. Jede Druckfarbe wird
+mit ihrer Überdruckstärke auf die darunterliegende Farbe gemischt, auch die
+erste: 50 % Schwarz auf weißem Papier ergibt Grau. Weitere Druckfarben werden
+in Druckreihenfolge darübergelegt. Automatische LAB-Werte werden aus diesen
+Mischfarben berechnet; explizite Pantone- oder LAB-Messwerte eines Zustands
+ersetzen dessen automatische Farbe.
+
+Es gibt genau einen Zustand je Druckplattenkombination. Die Palette unter dem
+Bild ist nach Leveln geordnet: Level 1 = Papier, Level 2 = Papier + eine
+Druckfarbe, Level 3 = Papier + zwei Druckfarben usw. Bei fünf Druckfarben sind
+es 32 Zustände und fünf Druckplatten. Dieselbe Palette gilt für Vollton,
+Raster, Überfüllung, Vorschau und Export.
+
+Die Papierkarte bietet Hintergrundfarben aus der Bibliothek, CMYK, Farbwähler,
+Pipette, Farbvorschau, LAB-Referenzfarbe und Klassifikations-Bias. Positive
+Bias-Werte bevorzugen unbedruckte Papierflächen. Papier benötigt weder
+Überdruckstärke noch Rasterwinkel oder eine eigene Druckplatte. Der bisherige
+Schalter entfällt, da Papier immer die Basis ist. Gespeicherte separate
+Papiermischungen werden beim Laden auf die entsprechenden Zustände übertragen.
+
+Mischungen mit mindestens zwei Druckfarben besitzen einen zusätzlichen
+„Mischfarben-Bias (ΔE)“. Ein positiver Wert bevorzugt genau diesen Zustand,
+ein negativer Wert reduziert ihn. Beispielsweise verstärkt ein Bias für
+„Papier + Rot + Gelb“ die Orange-Mischung, ohne die Gewichtung von Weiß oder
+von „Papier + Gelb + Weiß“ anzuheben. Der Wert wird zum Bias der beteiligten
+Druckfarben addiert und wirkt in Vollton- und Rastermodus, Vorschau und Export.
+Er wird gespeichert und bleibt beim Umordnen der Druckfarben der gleichen
+Kombination zugeordnet. Der Ausgangswert ist 0.
+
+Die Primärdruckfarben werden ausschließlich in ihren Druckfarbenkarten
+bearbeitet. Ihre Farbfelder zeigen direkt die mit Papier und Überdruckstärke
+berechnete Farbe; Farbwähler und CMYK-Eingaben definieren weiterhin die
+Ausgangsfarbe. Unter Überdruckfarben erscheinen nur Kombinationen aus mindestens
+zwei Druckfarben. In der Legende unter dem Bild trennen Linien die Gruppen;
+zusätzliche Level-Beschriftungen entfallen.
+
+Im Rastermodus werden neutrale Töne über einen neutralen Rasterverlauf
+wiedergegeben, sofern die Palette zwei neutrale Zustände bietet, die sich in
+genau einer Druckplatte unterscheiden. Auf schwarzem Papier mit weißer Farbe
+entstehen Graustufen dadurch ausschließlich aus weißen Rasterpunkten. Die
+Deckung folgt dem Flächenmittel der beiden simulierten Endfarben; hellere
+Vorlagenwerte als das verfügbare Weiß werden auf volle Weißdeckung begrenzt.
+Die Neutralbehandlung gilt vollständig bis LAB-Chroma 4 und läuft bis Chroma 12
+weich aus. Gesättigte Farben behalten die bisherige Mischfarbenzuordnung.
+Bias kann den neutralen Ton verschieben, führt dort aber keine bunten Platten
+hinzu. Gamma und Minimalpunkt wirken weiterhin anschließend auf die Deckung.
+
+Die Oberfläche bezeichnet Papier jetzt als „Hintergrund“. Dessen Bibliotheksliste
+enthält ausschließlich Hintergrundfarben, einschließlich „Schwarz“ (#000000).
+Druckfarbentitel lassen sich per Klick direkt bearbeiten: Enter oder Verlassen
+des Felds übernimmt den Namen, Escape bricht ab. Eigene Namen bleiben bei
+Farbänderungen und nach einem Neustart erhalten und erscheinen auch bei
+Druckreihenfolge, Druckplatten und Export.
+
+Der Hintergrund trägt in Karten, Kombinationen und Legende die Nummer 0
+(zum Beispiel „0 + 1 + 2“). Über seiner Karte steht einmal „Hintergrundfarbe“.
